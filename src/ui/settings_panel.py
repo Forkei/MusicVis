@@ -6,11 +6,11 @@ from imgui_bundle import imgui
 DEFAULT_SETTINGS = {
     "bloom_tint": (0.0, 0.0, 1.0),
     "brightness": 2.6,
-    "energy_mult": 1.8,
+    "energy_mult": 3.0,
     "bloom_intensity": 5.0,
-    "loop_count": 13,
-    "noise_mult": 1.3,
-    "rotation_speed": 2.3,
+    "loop_count": 10,
+    "noise_mult": 0.3,
+    "rotation_speed": 2.18,
 }
 
 
