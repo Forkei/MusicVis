@@ -124,8 +124,8 @@ class App:
         # Resize callback
         glfw.set_framebuffer_size_callback(self.window, self._on_resize)
 
-        # Key callback for fullscreen toggle
-        glfw.set_key_callback(self.window, self._on_key)
+        # Key callback for fullscreen toggle (chain with ImGui's)
+        self._imgui_key_callback = glfw.set_key_callback(self.window, self._on_key)
 
         # Fullscreen state
         self._is_fullscreen = False
@@ -150,6 +150,14 @@ class App:
             self.renderer.resize(width, height)
 
     def _on_key(self, window, key, scancode, action, mods):
+        # Forward to ImGui's key callback first
+        if self._imgui_key_callback:
+            self._imgui_key_callback(window, key, scancode, action, mods)
+
+        # Don't handle fullscreen shortcuts when ImGui wants keyboard
+        io = imgui.get_io()
+        if io.want_capture_keyboard:
+            return
         if action != glfw.PRESS:
             return
         if key == glfw.KEY_F11 or (key == glfw.KEY_F and mods == 0):
