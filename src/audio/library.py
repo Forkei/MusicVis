@@ -15,6 +15,8 @@ DOWNLOADS_DIR = os.path.join(
 )
 LIBRARY_JSON = os.path.join(DOWNLOADS_DIR, "library.json")
 
+ANALYSIS_VERSION = 2
+
 
 class SongLibrary:
     """Manages downloaded songs, metadata, and analysis cache."""
@@ -122,7 +124,7 @@ class SongLibrary:
         stem = os.path.splitext(entry["wav_filename"])[0]
         npz_path = os.path.join(DOWNLOADS_DIR, f"{stem}.analysis.npz")
 
-        data = {}
+        data = {"_version": np.array([ANALYSIS_VERSION])}
         for f in fields(result):
             val = getattr(result, f.name)
             if isinstance(val, np.ndarray):
@@ -139,7 +141,7 @@ class SongLibrary:
             self._save()
 
     def load_analysis(self, entry: dict) -> AnalysisResult | None:
-        """Load cached analysis from NPZ. Returns None on failure."""
+        """Load cached analysis from NPZ. Returns None on version mismatch or failure."""
         stem = os.path.splitext(entry["wav_filename"])[0]
         npz_path = os.path.join(DOWNLOADS_DIR, f"{stem}.analysis.npz")
 
@@ -148,6 +150,14 @@ class SongLibrary:
 
         try:
             data = np.load(npz_path)
+
+            # Version check — reject old format
+            if "_version" not in data:
+                return None
+            version = int(data["_version"][0])
+            if version != ANALYSIS_VERSION:
+                return None
+
             kwargs = {}
             for f in fields(AnalysisResult):
                 arr = data[f.name]

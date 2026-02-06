@@ -43,6 +43,26 @@ class AnalysisResult:
     anticipation_factor: np.ndarray  # 0-1, ramps up before drop
     explosion_factor: np.ndarray     # 0-1, spikes at drop then decays
 
+    # A2: Chroma / Key
+    chroma: np.ndarray              # (12, n_frames) float32 — pitch class energy
+    key_index: int                  # 0-11 (C, C#, D, ... B)
+
+    # A3: Section segmentation
+    section_labels: np.ndarray      # (n_frames,) int32 — section ID per frame
+    n_sections: int
+
+    # A4: Vocal detection
+    vocal_presence: np.ndarray      # (n_frames,) float32 — 0=instrumental, 1=vocal
+
+    # A5: Groove / swing
+    groove_factor: float            # scalar 0-1 (0=robotic grid, 1=heavy swing)
+
+    # A6: Tempo
+    tempo: float                    # BPM
+
+    # B7: Mel spectrum for waveform ring
+    mel_spectrum: np.ndarray        # (64, n_frames) float32 — 64-bin mel spectrogram
+
     def frame_at(self, time: float) -> int:
         """Get frame index for a given time in seconds."""
         frame = int(time * self.sr / self.hop_length)
@@ -67,6 +87,10 @@ class AnalysisResult:
             "onset_sharpness": float(self.onset_sharpness[f]),
             "anticipation_factor": float(self.anticipation_factor[f]),
             "explosion_factor": float(self.explosion_factor[f]),
+            "vocal_presence": float(self.vocal_presence[f]),
+            "groove_factor": self.groove_factor,
+            "section_id": int(self.section_labels[f]),
+            "tempo": self.tempo,
         }
 
 
@@ -101,6 +125,14 @@ def _fit_length(arr: np.ndarray, n_frames: int) -> np.ndarray:
     return np.pad(arr, (0, n_frames - len(arr)))
 
 
+def _fit_2d(arr: np.ndarray, n_frames: int) -> np.ndarray:
+    """Trim or pad 2D array (n_bins, time) to exactly n_frames columns."""
+    if arr.shape[1] >= n_frames:
+        return arr[:, :n_frames]
+    pad_width = n_frames - arr.shape[1]
+    return np.pad(arr, ((0, 0), (0, pad_width)))
+
+
 def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     """Analyze audio file and return pre-computed features.
 
@@ -120,7 +152,12 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     hop_length = 735  # ~60fps at 44100 sr
     fps = sr / hop_length
 
-    report(0.05)
+    report(0.03)
+
+    # --- A1. HPSS ---
+    y_harmonic, y_percussive = librosa.effects.hpss(y, margin=2.0)
+
+    report(0.08)
 
     # --- 1A. Mel spectrogram (compute once, reuse for everything) ---
     S = librosa.feature.melspectrogram(
@@ -128,14 +165,29 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     )
     n_frames = S.shape[1]
 
-    report(0.15)
+    report(0.13)
 
     # --- RMS energy (from mel spectrogram for consistency) ---
     rms_raw = librosa.feature.rms(y=y, hop_length=hop_length)[0]
     rms_raw = _fit_length(rms_raw, n_frames)
     rms = _normalize(rms_raw)
 
-    report(0.2)
+    report(0.16)
+
+    # --- A6. Tempo + beat tracking (needed for tempo-synced windows) ---
+    tempo_val, beat_frames = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop_length)
+    if hasattr(tempo_val, '__len__'):
+        tempo_val = float(tempo_val[0]) if len(tempo_val) > 0 else 120.0
+    else:
+        tempo_val = float(tempo_val)
+    if tempo_val < 30.0:
+        tempo_val = 120.0
+
+    # Tempo-synced smoothing window (8 beats)
+    beat_dur = 60.0 / tempo_val
+    window_s = 8.0 * beat_dur
+
+    report(0.20)
 
     # --- 1B. Sub-band energy ---
     bass_raw = np.mean(S[:15, :], axis=0)       # bins 0-14, ~20-250Hz
@@ -144,18 +196,18 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
 
     # Bass: globally normalized (quiet sections = small ball)
     bass_energy = _normalize(bass_raw)
-    # Mid/treble: locally normalized (subtle variations visible in quiet sections)
-    mid_energy = _local_normalize(mid_raw, 10.0, fps)
-    treble_energy = _local_normalize(treble_raw, 10.0, fps)
+    # Mid/treble: locally normalized with tempo-synced window
+    mid_energy = _local_normalize(mid_raw, window_s, fps)
+    treble_energy = _local_normalize(treble_raw, window_s, fps)
 
-    report(0.3)
+    report(0.25)
 
     # --- Onset strength ---
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
+    onset_env = librosa.onset.onset_strength(y=y_percussive, sr=sr, hop_length=hop_length)
     onset_env = _fit_length(onset_env, n_frames)
-    onset_strength = _local_normalize(onset_env, 12.0, fps)
+    onset_strength = _local_normalize(onset_env, window_s * 1.5, fps)
 
-    report(0.35)
+    report(0.28)
 
     # --- 1F. Onset sharpness ---
     onset_smooth = uniform_filter1d(onset_env, max(1, int(fps * 0.2)))
@@ -163,10 +215,9 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     sharpness = np.clip(sharpness, 0, None)
     onset_sharpness = _normalize(sharpness)
 
-    report(0.4)
+    report(0.31)
 
-    # --- Beat tracking ---
-    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop_length)
+    # --- Beat pulse ---
     beat_pulse = np.zeros(n_frames)
     for bf in beat_frames:
         if bf < n_frames:
@@ -175,10 +226,9 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
                 dist = abs(i - bf) / width
                 beat_pulse[i] = max(beat_pulse[i], 1.0 - dist)
 
-    report(0.5)
+    report(0.35)
 
     # --- 1D. Beat classification (kick vs snare) + hihat ---
-    # Sub-band spectral flux for onset detection per band
     bass_flux = np.sum(np.maximum(0, np.diff(S[:15, :], axis=1)), axis=0)
     bass_flux = np.concatenate([[0.0], bass_flux])
     bass_flux = _fit_length(bass_flux, n_frames)
@@ -200,36 +250,33 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
         if bf >= n_frames:
             continue
         if bass_flux[bf] >= mid_flux[bf]:
-            # Kick: bass-dominant beat
             for i in range(max(0, bf - pulse_width), min(n_frames, bf + pulse_width + 1)):
                 dist = abs(i - bf) / max(1, pulse_width)
                 kick_pulse[i] = max(kick_pulse[i], 1.0 - dist)
         else:
-            # Snare: mid-dominant beat
             for i in range(max(0, bf - pulse_width), min(n_frames, bf + pulse_width + 1)):
                 dist = abs(i - bf) / max(1, pulse_width)
                 snare_pulse[i] = max(snare_pulse[i], 1.0 - dist)
 
-    # Hihat: continuous treble transient envelope (not beat-locked)
-    hihat_pulse = _local_normalize(treble_flux, 10.0, fps)
-    # Peak enhancement: square to emphasize transients, then re-normalize
+    # Hihat: continuous treble transient envelope
+    hihat_pulse = _local_normalize(treble_flux, window_s, fps)
     hihat_pulse = _normalize(hihat_pulse ** 2)
 
-    report(0.6)
+    report(0.40)
 
-    # --- Spectral centroid ---
-    cent = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)[0]
+    # --- Spectral centroid (from harmonic component) ---
+    cent = librosa.feature.spectral_centroid(y=y_harmonic, sr=sr, hop_length=hop_length)[0]
     cent = _fit_length(cent, n_frames)
     spectral_centroid = _normalize(cent)
 
-    report(0.65)
+    report(0.43)
 
     # --- Spectral bandwidth ---
     bw = librosa.feature.spectral_bandwidth(y=y, sr=sr, hop_length=hop_length)[0]
     bw = _fit_length(bw, n_frames)
-    spectral_bandwidth = _local_normalize(bw, 10.0, fps)
+    spectral_bandwidth = _local_normalize(bw, window_s, fps)
 
-    report(0.7)
+    report(0.46)
 
     # --- Spectral flux (full-spectrum, locally normalized) ---
     full_flux = np.sqrt(
@@ -237,9 +284,75 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     )
     full_flux = np.concatenate([[0.0], full_flux])
     full_flux = _fit_length(full_flux, n_frames)
-    spectral_flux = _local_normalize(full_flux, 10.0, fps)
+    spectral_flux = _local_normalize(full_flux, window_s, fps)
 
-    report(0.8)
+    report(0.50)
+
+    # --- A2. Chroma / Key (from harmonic component) ---
+    chroma_cqt = librosa.feature.chroma_cqt(y=y_harmonic, sr=sr, hop_length=hop_length)
+    chroma_cqt = _fit_2d(chroma_cqt, n_frames)
+    key_index = int(np.argmax(np.mean(chroma_cqt, axis=1)))
+
+    report(0.55)
+
+    # --- A3. Section segmentation ---
+    try:
+        from sklearn.cluster import SpectralClustering
+        # Build recurrence matrix from chroma
+        R = librosa.segment.recurrence_matrix(
+            chroma_cqt, metric='cosine', mode='affinity', width=9, self=True
+        )
+        n_clusters = max(2, min(8, int(duration / 20)))
+        labels = SpectralClustering(
+            n_clusters=n_clusters, affinity='precomputed', random_state=42
+        ).fit_predict(R)
+        # labels has one entry per spectrogram frame — expand to n_frames if needed
+        if len(labels) < n_frames:
+            section_labels = np.zeros(n_frames, dtype=np.int32)
+            section_labels[:len(labels)] = labels
+            section_labels[len(labels):] = labels[-1] if len(labels) > 0 else 0
+        else:
+            section_labels = labels[:n_frames].astype(np.int32)
+        n_sections = n_clusters
+    except Exception:
+        # Fallback: no segmentation
+        section_labels = np.zeros(n_frames, dtype=np.int32)
+        n_sections = 1
+
+    report(0.65)
+
+    # --- A4. Vocal detection ---
+    vocal_band = S[15:80, :]  # ~300Hz-3kHz
+    geo = np.exp(np.mean(np.log(vocal_band + 1e-8), axis=0))
+    arith = np.mean(vocal_band, axis=0)
+    flatness = geo / (arith + 1e-8)
+    vocal_presence = 1.0 - _normalize(flatness)
+    vocal_presence = _local_normalize(vocal_presence, window_s, fps)
+
+    report(0.70)
+
+    # --- A5. Groove / swing ---
+    if len(beat_frames) > 3:
+        beat_times = librosa.frames_to_time(beat_frames, sr=sr, hop_length=hop_length)
+        mean_interval = np.mean(np.diff(beat_times))
+        expected = beat_times[0] + mean_interval * np.arange(len(beat_times))
+        groove_factor = float(np.clip(
+            np.sqrt(np.mean((beat_times - expected[:len(beat_times)])**2)) / 0.05, 0, 1
+        ))
+    else:
+        groove_factor = 0.0
+
+    report(0.75)
+
+    # --- B7. Mel spectrum storage (64-bin for waveform ring) ---
+    mel_64 = librosa.feature.melspectrogram(
+        y=y, sr=sr, hop_length=hop_length, n_mels=64, fmax=8000
+    )
+    mel_64 = _fit_2d(mel_64, n_frames)
+    mel_max = mel_64.max(axis=1, keepdims=True) + 1e-8
+    mel_spectrum = (mel_64 / mel_max).astype(np.float32)
+
+    report(0.80)
 
     # --- 1E. EDM buildup/drop detection ---
     anticipation_factor, explosion_factor = _detect_climaxes_edm(
@@ -268,6 +381,14 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
         onset_sharpness=onset_sharpness.astype(np.float32),
         anticipation_factor=anticipation_factor.astype(np.float32),
         explosion_factor=explosion_factor.astype(np.float32),
+        chroma=chroma_cqt.astype(np.float32),
+        key_index=key_index,
+        section_labels=section_labels.astype(np.int32),
+        n_sections=n_sections,
+        vocal_presence=vocal_presence.astype(np.float32),
+        groove_factor=groove_factor,
+        tempo=tempo_val,
+        mel_spectrum=mel_spectrum,
     )
 
 
@@ -293,7 +414,7 @@ def _detect_climaxes_edm(
       - Cluster peaks with 6s minimum gap
 
     Output curves:
-      - anticipation_factor: smoothstep ramp t²(3-2t) over 4s before each drop
+      - anticipation_factor: smoothstep ramp t^2(3-2t) over 4s before each drop
       - explosion_factor: exponential decay exp(-4t) over 2s after each drop
     """
     smooth_w = max(3, int(1.0 * fps))  # 1s smoothing
@@ -385,7 +506,7 @@ def _detect_climaxes_edm(
     release_duration = max(1, int(2.0 * fps))    # 2s decay after drop
 
     for df in drop_frames:
-        # Anticipation: smoothstep ramp t²(3-2t) over buildup_duration before drop
+        # Anticipation: smoothstep ramp t^2(3-2t) over buildup_duration before drop
         start = max(0, df - buildup_duration)
         for f in range(start, min(df, n_frames)):
             t = (f - start) / max(1, df - start)

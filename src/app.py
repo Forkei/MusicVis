@@ -24,6 +24,7 @@ from src.ui.search_panel import SearchPanel
 from src.ui.player_controls import PlayerControls
 from src.ui.settings_panel import SettingsPanel
 from src.ui.library_panel import LibraryPanel
+from src.ui.preset_manager import PresetManager
 
 
 class AppState(Enum):
@@ -74,7 +75,7 @@ class App:
         if not glfw.init():
             raise RuntimeError("Failed to initialize GLFW")
 
-        glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+        glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 4)
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
         glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
         glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, True)
@@ -107,15 +108,25 @@ class App:
 
         # Renderer + generator
         self.renderer = Renderer(self.ctx, width, height)
-        self.ball_gen = EnergyBallGenerator()
+        self.ball_gen = EnergyBallGenerator(self.ctx)
 
         # UI panels
         self.search_panel = SearchPanel()
         self.player_controls = PlayerControls()
         self.settings_panel = SettingsPanel()
+        self.preset_manager = PresetManager()
+        self.settings_panel.set_preset_manager(self.preset_manager)
 
         # Resize callback
         glfw.set_framebuffer_size_callback(self.window, self._on_resize)
+
+        # Key callback for fullscreen toggle
+        glfw.set_key_callback(self.window, self._on_key)
+
+        # Fullscreen state
+        self._is_fullscreen = False
+        self._windowed_pos = glfw.get_window_pos(self.window)
+        self._windowed_size = (width, height)
 
         # Idle features for when no song is loaded
         self._idle_time_start = time.time()
@@ -129,6 +140,33 @@ class App:
             self.height = height
             self.ctx.viewport = (0, 0, width, height)
             self.renderer.resize(width, height)
+
+    def _on_key(self, window, key, scancode, action, mods):
+        if action != glfw.PRESS:
+            return
+        if key == glfw.KEY_F11 or (key == glfw.KEY_F and mods == 0):
+            self._toggle_fullscreen()
+        elif key == glfw.KEY_ESCAPE and self._is_fullscreen:
+            self._toggle_fullscreen()
+
+    def _toggle_fullscreen(self):
+        if self._is_fullscreen:
+            # Exit fullscreen — restore windowed position/size
+            x, y = self._windowed_pos
+            w, h = self._windowed_size
+            glfw.set_window_monitor(self.window, None, x, y, w, h, 0)
+            self._is_fullscreen = False
+        else:
+            # Enter fullscreen — save current position/size
+            self._windowed_pos = glfw.get_window_pos(self.window)
+            self._windowed_size = glfw.get_window_size(self.window)
+            monitor = glfw.get_primary_monitor()
+            mode = glfw.get_video_mode(monitor)
+            glfw.set_window_monitor(
+                self.window, monitor, 0, 0,
+                mode.size.width, mode.size.height, mode.refresh_rate
+            )
+            self._is_fullscreen = True
 
     def run(self):
         """Main loop."""
@@ -453,19 +491,26 @@ class App:
         settings = self.settings_panel.settings
         features = self._get_current_features()
 
+        # Pass mel_spectrum frame for waveform ring
+        if self.analysis is not None and self.state == AppState.PLAYING:
+            pos = self.player.get_position()
+            frame = self.analysis.frame_at(pos)
+            features["mel_frame"] = self.analysis.mel_spectrum[:, frame]
+
         now = time.time()
         delta_time = min(now - self._last_frame_time, 0.05)
         self._last_frame_time = now
 
-        segments = self.ball_gen.generate(
+        seg_buffer, compute_count, ring_segs = self.ball_gen.generate(
             self.width, self.height, now, delta_time, features, settings
         )
 
-        # Add flash from onset to settings for renderer
+        # Add flash and global hue from features to render settings
         render_settings = dict(settings)
         render_settings["flash"] = features.get("onset_strength", 0.0)
+        render_settings["global_hue"] = features.get("spectral_centroid", 0.5) * 0.65
 
-        self.renderer.render(segments, render_settings, delta_time)
+        self.renderer.render(seg_buffer, compute_count, ring_segs, render_settings, delta_time)
 
     def _get_current_features(self) -> dict:
         """Get audio features for current playback position."""
@@ -491,10 +536,15 @@ class App:
             "onset_sharpness": 0.0,
             "anticipation_factor": 0.0,
             "explosion_factor": 0.0,
+            "vocal_presence": 0.0,
+            "groove_factor": 0.0,
+            "section_id": 0,
+            "tempo": 120.0,
         }
 
     def _cleanup(self):
         self.player.cleanup()
+        self.ball_gen.cleanup()
         self.renderer.cleanup()
         self.imgui_impl.shutdown()
         imgui.destroy_context()

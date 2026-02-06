@@ -1,18 +1,28 @@
-"""Persistent 3D loop tangle visualization (CPU side).
+"""Persistent 3D loop tangle visualization with GPU compute.
 
-Generates 10-20 persistent closed-loop splines that orbit in 3D,
+Generates 10-25 persistent closed-loop splines that orbit in 3D,
 creating a tangled wire ball / scribble sphere effect.
+Spline generation is done on GPU via compute shader (GL 4.3).
+Loops are differentiated by frequency band (bass/mid/treble).
 """
 
 import math
+import os
 import numpy as np
+import moderngl
+
+
+SHADER_DIR = os.path.join(os.path.dirname(__file__), "shaders")
 
 
 class Loop:
     """A single persistent closed-loop spline orbiting in 3D."""
 
-    def __init__(self, n_control_points: int, rng: np.random.RandomState):
+    def __init__(self, n_control_points: int, rng: np.random.RandomState,
+                 band_index: int = 1, hue_offset: float = 0.0):
         self.n_cp = n_control_points
+        self.band_index = band_index  # 0=bass, 1=mid, 2=treble
+        self.hue_offset = hue_offset
 
         # Random tilt axis for the great circle
         tilt_theta = rng.uniform(0, math.pi)
@@ -21,68 +31,76 @@ class Loop:
         # Base control points: evenly around a tilted great circle
         angles = np.linspace(0, 2 * math.pi, n_control_points, endpoint=False)
 
-        # Great circle in XZ plane, then rotate by tilt
-        self.base_theta = np.full(n_control_points, math.pi / 2)  # equator
+        self.base_theta = np.full(n_control_points, math.pi / 2)
         self.base_phi = angles.copy()
 
-        # Apply random tilt by storing rotation matrix
         ct, st = math.cos(tilt_theta), math.sin(tilt_theta)
         cp, sp = math.cos(tilt_phi), math.sin(tilt_phi)
-        # Rotation: first around Y by phi, then around X by theta
         self.rot_matrix = np.array([
             [cp * ct, -sp, cp * st],
             [sp * ct,  cp, sp * st],
             [-st,       0,  ct],
-        ])
+        ], dtype=np.float32)
 
-        # Random perturbation to break perfect circle (gentler for smoother loops)
         self.base_theta += rng.uniform(-0.3, 0.3, n_control_points)
         self.base_phi += rng.uniform(-0.2, 0.2, n_control_points)
 
         # Noise phase offsets (unique per control point, per axis)
-        self.noise_phase = rng.uniform(0, 100, (n_control_points, 3))
+        self.noise_phase = rng.uniform(0, 100, (n_control_points, 3)).astype(np.float32)
 
-        # Visual properties
-        self.base_thickness = rng.uniform(3.0, 5.0)
-        self.base_brightness = rng.uniform(0.5, 1.0)
+        # Visual properties — modulated by band
+        if band_index == 0:  # bass
+            self.base_thickness = float(rng.uniform(3.0, 5.0) * 1.3)
+            self.base_brightness = float(rng.uniform(0.5, 1.0))
+        elif band_index == 2:  # treble
+            self.base_thickness = float(rng.uniform(3.0, 5.0) * 0.7)
+            self.base_brightness = float(rng.uniform(0.5, 1.0))
+        else:  # mid
+            self.base_thickness = float(rng.uniform(3.0, 5.0))
+            self.base_brightness = float(rng.uniform(0.5, 1.0))
 
 
-def _catmull_rom(p0, p1, p2, p3, n_subdiv):
-    """Catmull-Rom spline interpolation between p1 and p2 (N-dimensional).
+def _pack_loop_data(loops: list[Loop]) -> np.ndarray:
+    """Pack all loop data into a flat float32 array for SSBO.
 
-    Returns n_subdiv points (not including p1, but including p2 at t=1 if n_subdiv includes it).
+    Per loop: 24 CPs × 5 floats + 9 floats (rot matrix) + 4 floats (visual) = 133 floats
     """
-    ts = np.linspace(0, 1, n_subdiv + 1)[1:]  # exclude t=0 (that's p1)
-    t2 = ts * ts
-    t3 = t2 * ts
+    n_loops = len(loops)
+    data = np.zeros(n_loops * 133, dtype=np.float32)
 
-    n_dims = len(p0)
-    out = np.empty((n_subdiv, n_dims))
-    for dim in range(n_dims):
-        a = -0.5 * p0[dim] + 1.5 * p1[dim] - 1.5 * p2[dim] + 0.5 * p3[dim]
-        b = p0[dim] - 2.5 * p1[dim] + 2.0 * p2[dim] - 0.5 * p3[dim]
-        c = -0.5 * p0[dim] + 0.5 * p2[dim]
-        d = p1[dim]
-        out[:, dim] = a * t3 + b * t2 + c * ts + d
+    for i, loop in enumerate(loops):
+        base = i * 133
 
-    return out
+        # 24 control points × 5 floats each
+        for j in range(24):
+            cp_base = base + j * 5
+            data[cp_base + 0] = loop.base_theta[j]
+            data[cp_base + 1] = loop.base_phi[j]
+            data[cp_base + 2] = loop.noise_phase[j, 0]
+            data[cp_base + 3] = loop.noise_phase[j, 1]
+            data[cp_base + 4] = loop.noise_phase[j, 2]
 
+        # Rotation matrix (9 floats at offset 120)
+        rm_base = base + 120
+        # mat3 in GLSL is column-major, but we read it row-by-row in the shader
+        # so pack as flat row-major matching our shader's access pattern
+        data[rm_base:rm_base + 9] = loop.rot_matrix.flatten()
 
-def _multi_sine_noise(phase, t, speed):
-    """Smooth multi-sine noise: 4 octaves for flowing light-trail motion."""
-    ts = t * speed
-    return (
-        np.sin(phase * 0.5 + ts * 0.7) * 0.3   # slow large-scale drift
-        + np.sin(phase + ts) * 0.4               # primary motion
-        + np.sin(phase * 1.7 + ts * 2.3) * 0.2  # secondary detail
-        + np.sin(phase * 0.3 + ts * 4.1) * 0.1  # fine detail (small)
-    )
+        # Visual properties (4 floats at offset 129)
+        vp_base = base + 129
+        data[vp_base + 0] = loop.base_thickness
+        data[vp_base + 1] = loop.base_brightness
+        data[vp_base + 2] = loop.hue_offset
+        data[vp_base + 3] = float(loop.band_index)
+
+    return data
 
 
 class EnergyBallGenerator:
-    """Generates persistent 3D loop tangle geometry each frame."""
+    """Generates persistent 3D loop tangle geometry each frame using GPU compute."""
 
-    def __init__(self):
+    def __init__(self, ctx: moderngl.Context):
+        self.ctx = ctx
         self._loops: list[Loop] = []
         self._current_radius = 50.0
         self._rotation_angle = 0.0
@@ -90,15 +108,64 @@ class EnergyBallGenerator:
         self._initialized = False
         self._rng = np.random.RandomState(42)
 
+        # Load compute shader
+        comp_path = os.path.join(SHADER_DIR, "spline.comp")
+        with open(comp_path, "r") as f:
+            comp_src = f.read()
+        self._compute = ctx.compute_shader(comp_src)
+
+        # SSBOs — will be created on first _ensure_loops
+        self._loop_ssbo: moderngl.Buffer | None = None
+        self._segment_ssbo: moderngl.Buffer | None = None
+        self._current_loop_count = 0
+        self._hihat_dirty = False
+
     def _ensure_loops(self, count: int):
-        """Create or adjust the number of persistent loops."""
-        if len(self._loops) == count and self._initialized:
+        """Create or adjust the number of persistent loops with band assignment."""
+        if self._current_loop_count == count and self._initialized:
             return
 
         self._loops = []
-        for _ in range(count):
-            self._loops.append(Loop(24, self._rng))
+        third = count / 3.0
+        for i in range(count):
+            if i < third:
+                band = 0       # bass
+                hue_off = -0.1
+            elif i < 2 * third:
+                band = 1       # mid
+                hue_off = 0.0
+            else:
+                band = 2       # treble
+                hue_off = 0.15
+            self._loops.append(Loop(24, self._rng, band_index=band, hue_offset=hue_off))
+
+        # Pack and upload loop data to SSBO
+        loop_data = _pack_loop_data(self._loops)
+        if self._loop_ssbo is not None:
+            self._loop_ssbo.release()
+        self._loop_ssbo = self.ctx.buffer(loop_data.tobytes())
+
+        # Create segment output SSBO: count × 240 segments × 8 floats
+        seg_size = count * 240 * 8 * 4  # bytes
+        if self._segment_ssbo is not None:
+            self._segment_ssbo.release()
+        self._segment_ssbo = self.ctx.buffer(reserve=seg_size)
+
+        self._current_loop_count = count
         self._initialized = True
+
+    def _update_loop_ssbo_noise(self):
+        """Re-upload loop data when noise phases are mutated (hihat jitter)."""
+        if not self._loops:
+            return
+        loop_data = _pack_loop_data(self._loops)
+        self._loop_ssbo.orphan(len(loop_data) * 4)
+        self._loop_ssbo.write(loop_data.tobytes())
+
+    @property
+    def segment_buffer(self) -> moderngl.Buffer | None:
+        """The output SSBO that doubles as the instance VBO."""
+        return self._segment_ssbo
 
     def generate(
         self,
@@ -108,11 +175,13 @@ class EnergyBallGenerator:
         delta_time: float,
         features: dict,
         settings: dict,
-    ) -> np.ndarray:
-        """Generate loop tangle geometry for one frame.
+    ) -> tuple[moderngl.Buffer | None, int, np.ndarray | None]:
+        """Generate loop tangle geometry for one frame using GPU compute.
 
         Returns:
-            numpy array of shape (N, 6): [x0, y0, x1, y1, thickness, brightness]
+            (segment_buffer, compute_segment_count, ring_segments_or_None)
+            The buffer is the SSBO containing compute-generated segments.
+            ring_segments is a CPU-generated numpy array for the waveform ring (if enabled).
         """
         loop_count = int(settings.get("loop_count", 15))
         loop_count = max(5, min(25, loop_count))
@@ -124,13 +193,11 @@ class EnergyBallGenerator:
         # Extract audio features
         rms = features.get("rms", 0.3)
         onset = features.get("onset_strength", 0.0)
-        beat = features.get("beat_pulse", 0.0)
         bandwidth = features.get("spectral_bandwidth", 0.5)
         spectral_flux = features.get("spectral_flux", 0.1)
         anticipation = features.get("anticipation_factor", 0.0)
         explosion = features.get("explosion_factor", 0.0)
 
-        # New EDM-specific features
         bass = features.get("bass_energy", 0.12)
         mid = features.get("mid_energy", 0.2)
         treble = features.get("treble_energy", 0.15)
@@ -144,165 +211,126 @@ class EnergyBallGenerator:
 
         dt = min(delta_time, 0.05)
 
-        # --- A. Spring-damped radius (bass drives size) ---
+        # --- A. Spring-damped radius ---
         quiet_radius = half_min * 0.04
         loud_radius = half_min * 0.22
 
         target = quiet_radius + (loud_radius - quiet_radius) * (bass ** 0.7) * energy_mult
-
-        # Anticipation compresses, explosion expands
         target *= (1.0 - anticipation * 0.25)
         target *= (1.0 + explosion * 1.5)
 
-        # Hard cap: never exceed center third of screen width
         max_radius = width / 6.0
         target = min(target, max_radius)
 
-        # Critically damped follow (no bounce/overshoot)
-        smoothing = 1.0 - math.exp(-8.0 * dt)  # ~8 Hz response, no oscillation
+        smoothing = 1.0 - math.exp(-8.0 * dt)
         self._current_radius += (target - self._current_radius) * smoothing
 
-        # Kick: radius snap on bass hits (replaces generic beat_pulse)
         kick_impulse = max(0.0, kick - self._prev_beat)
         if kick_impulse > 0.3:
             self._current_radius += kick_impulse * self._current_radius * 0.15
         self._prev_beat = kick
 
-        # Hard cap radius after spring physics too
-        max_radius = width / 6.0
         self._current_radius = min(self._current_radius, max_radius)
         radius = max(5.0, self._current_radius)
 
-        # --- B. Noise parameters (mid drives chaos) ---
+        # --- B. Noise parameters ---
         noise_intensity = (0.05 + mid * 0.2 + bandwidth * 0.15 + explosion * 0.4) * noise_mult
         noise_speed = 3.0 + spectral_flux * 8.0 + anticipation * 5.0
 
         # --- C. Rotation ---
         self._rotation_angle += dt * (0.3 + anticipation * 0.8 + rms * 0.2) * rotation_speed
 
-        # --- D. Volume scatter: tight on surface when small, fill interior when big ---
+        # --- D. Volume scatter ---
         radius_ratio = (radius - quiet_radius) / max(1.0, loud_radius - quiet_radius)
         radius_ratio = max(0.0, min(1.0, radius_ratio))
-        volume_scatter = radius_ratio ** 2.0  # quadratic: stays tight until really loud
+        volume_scatter = radius_ratio ** 2.0
 
-        # --- E. Animate control points and build segments ---
-        cos_rot = math.cos(self._rotation_angle)
-        sin_rot = math.sin(self._rotation_angle)
-        perspective_d = 3.0  # perspective distance
+        angular_boost = 1.0 + volume_scatter * 1.5
 
-        all_segments = []
+        # --- E. Hihat jitter (CPU-side noise phase mutation) ---
+        if hihat > 0.5:
+            for loop in self._loops:
+                loop.noise_phase += self._rng.uniform(-0.5, 0.5, loop.noise_phase.shape).astype(np.float32)
+            self._update_loop_ssbo_noise()
 
-        for loop in self._loops:
-            n_cp = loop.n_cp
+        # --- F. Dynamic loop count ---
+        active = max(3, int(rms * energy_mult * loop_count))
 
-            # Compute noise offsets for theta, phi, r
-            angular_boost = 1.0 + volume_scatter * 1.5
-            noise_theta = _multi_sine_noise(loop.noise_phase[:, 0], time, noise_speed) * noise_intensity * angular_boost
-            noise_phi = _multi_sine_noise(loop.noise_phase[:, 1], time, noise_speed) * noise_intensity * angular_boost
-            noise_r = _multi_sine_noise(loop.noise_phase[:, 2], time, noise_speed)
+        # --- G. Dispatch compute shader ---
+        self._compute["u_time"] = time
+        self._compute["u_radius"] = radius
+        self._compute["u_center"] = (cx, cy)
+        self._compute["u_rotation_angle"] = self._rotation_angle
+        self._compute["u_perspective_d"] = 3.0
+        self._compute["u_noise_intensity"] = noise_intensity
+        self._compute["u_noise_speed"] = noise_speed
+        self._compute["u_bass"] = bass
+        self._compute["u_mid"] = mid
+        self._compute["u_treble"] = treble
+        self._compute["u_kick"] = kick
+        self._compute["u_snare"] = snare
+        self._compute["u_rms"] = rms
+        self._compute["u_volume_scatter"] = volume_scatter
+        self._compute["u_angular_boost"] = angular_boost
+        self._compute["u_loop_count"] = loop_count
+        self._compute["u_active_loops"] = active
 
-            # Hihat jitter: kick noise phases on hi-hat transients
-            if hihat > 0.5:
-                loop.noise_phase += self._rng.uniform(-0.5, 0.5, loop.noise_phase.shape)
+        self._loop_ssbo.bind_to_storage_buffer(0)
+        self._segment_ssbo.bind_to_storage_buffer(1)
 
-            # Animated spherical coords
-            theta = loop.base_theta + noise_theta * math.pi
-            phi = loop.base_phi + noise_phi * 2 * math.pi
+        self._compute.run(group_x=loop_count, group_y=1, group_z=1)
 
-            # Radial scatter: surface-hugging when small, volume-filling when big
-            r_base = 1.0 - volume_scatter * 0.7       # center shifts inward: 1.0 → 0.3
-            r_spread = noise_intensity * 0.5 + volume_scatter * 0.5
-            r_factor = r_base + noise_r * r_spread
-            r_factor = np.clip(r_factor, 0.1, 1.3)
+        compute_seg_count = loop_count * 240
 
-            # Spherical to Cartesian
-            sin_theta = np.sin(theta)
-            cos_theta = np.cos(theta)
-            sin_phi = np.sin(phi)
-            cos_phi = np.cos(phi)
+        # --- H. Waveform ring (CPU, appended separately) ---
+        ring_segs = None
+        if settings.get("show_ring", True):
+            ring_segs = self._generate_ring(cx, cy, radius, features, settings)
 
-            x_local = sin_theta * cos_phi * r_factor
-            y_local = cos_theta * r_factor
-            z_local = sin_theta * sin_phi * r_factor
+        return self._segment_ssbo, compute_seg_count, ring_segs
 
-            # Apply loop's tilt rotation
-            xyz = np.stack([x_local, y_local, z_local], axis=0)  # (3, n_cp)
-            xyz = loop.rot_matrix @ xyz  # (3, n_cp)
+    def _generate_ring(self, cx: float, cy: float, radius: float,
+                       features: dict, settings: dict) -> np.ndarray | None:
+        """Generate waveform frequency ring around the ball."""
+        mel_frame = features.get("mel_frame", None)
+        if mel_frame is None:
+            return None
 
-            # Y-axis rotation (global)
-            x_rot = xyz[0] * cos_rot - xyz[2] * sin_rot
-            y_rot = xyz[1]
-            z_rot = xyz[0] * sin_rot + xyz[2] * cos_rot
+        ring_opacity = settings.get("ring_opacity", 0.5)
+        if ring_opacity < 0.01:
+            return None
 
-            # --- F. Catmull-Rom subdivision in 3D (before projection) ---
-            pts_3d = np.stack([x_rot, y_rot, z_rot], axis=1)  # (n_cp, 3)
+        n_bins = len(mel_frame)
+        ring_radius = radius * 1.5
+        angles = np.linspace(0, 2 * np.pi, n_bins, endpoint=False)
 
-            subdiv_3d = [pts_3d[0:1]]  # start with first point
-            n_subdiv = 10
+        displace = mel_frame * radius * 0.5
+        r = ring_radius + displace
 
-            for i in range(n_cp):
-                p0 = pts_3d[(i - 1) % n_cp]
-                p1 = pts_3d[i]
-                p2 = pts_3d[(i + 1) % n_cp]
-                p3 = pts_3d[(i + 2) % n_cp]
+        x = cx + np.cos(angles) * r
+        y = cy + np.sin(angles) * r
 
-                sub = _catmull_rom(p0, p1, p2, p3, n_subdiv)
-                subdiv_3d.append(sub)
+        x = np.append(x, x[0])
+        y = np.append(y, y[0])
 
-            # Concatenate all subdivision points and close the loop
-            all_3d = np.vstack(subdiv_3d)  # (1 + n_cp * n_subdiv, 3)
-            all_3d = np.vstack([all_3d, all_3d[0:1]])
+        n_segs = n_bins
+        segs = np.empty((n_segs, 8), dtype=np.float32)
+        segs[:, 0] = x[:-1]
+        segs[:, 1] = y[:-1]
+        segs[:, 2] = x[1:]
+        segs[:, 3] = y[1:]
+        segs[:, 4] = 2.0
+        segs[:, 5] = mel_frame * ring_opacity
+        segs[:, 6] = np.linspace(0.05, 0.6, n_bins).astype(np.float32)
+        segs[:, 7] = 0.5
 
-            # --- G. Project subdivided 3D points with per-point perspective ---
-            persp = perspective_d / (perspective_d + all_3d[:, 2])
-            screen_x = cx + all_3d[:, 0] * radius * persp
-            screen_y = cy + all_3d[:, 1] * radius * persp
+        return segs
 
-            # --- H. Per-segment depth factor from average perspective of endpoints ---
-            persp_avg = (persp[:-1] + persp[1:]) * 0.5
-            # Normalize: persp ranges ~0.5 (far) to ~1.5 (close), map to 0..1
-            depth_norm = (persp_avg - 0.5) / 1.0
-            depth_norm = np.clip(depth_norm, 0.0, 1.0)
-            thickness_mod = 0.4 + depth_norm * 0.6   # 0.4x (far) to 1.0x (close)
-            brightness_mod = 0.3 + depth_norm * 0.7   # 0.3x (far) to 1.0x (close)
-
-            # --- I. Curvature-based brightness (corner glow) ---
-            n_pts = len(screen_x)
-            if n_pts < 3:
-                continue
-
-            # Direction vectors between consecutive screen points
-            dx = np.diff(screen_x)
-            dy = np.diff(screen_y)
-            # Segment lengths
-            seg_len = np.sqrt(dx * dx + dy * dy) + 1e-8
-
-            # Cosine of angle between consecutive direction vectors
-            dot_prod = dx[:-1] * dx[1:] + dy[:-1] * dy[1:]
-            len_prod = seg_len[:-1] * seg_len[1:]
-            cos_angle = np.clip(dot_prod / len_prod, -1.0, 1.0)
-            curvature = 1.0 - cos_angle  # 0=straight, 2=reversal
-            curvature_boost = 1.0 + curvature * 0.5  # up to 1.5x at sharp turns
-
-            # Pad curvature_boost: first segment has no previous direction
-            curvature_boost = np.concatenate([[1.0], curvature_boost])
-
-            # --- J. Assemble segments with per-segment modulation ---
-            base_thickness = loop.base_thickness * (1.0 + kick * 0.3)
-            base_brightness = loop.base_brightness * (0.5 + treble * 0.3 + rms * 0.2) * (1.0 + snare * 1.5)
-
-            n_segs = n_pts - 1
-            segs = np.empty((n_segs, 6), dtype=np.float32)
-            segs[:, 0] = screen_x[:-1]
-            segs[:, 1] = screen_y[:-1]
-            segs[:, 2] = screen_x[1:]
-            segs[:, 3] = screen_y[1:]
-            segs[:, 4] = base_thickness * thickness_mod
-            segs[:, 5] = base_brightness * brightness_mod * curvature_boost
-
-            all_segments.append(segs)
-
-        if not all_segments:
-            return np.zeros((0, 6), dtype=np.float32)
-
-        return np.vstack(all_segments)
+    def cleanup(self):
+        """Release GPU resources."""
+        for buf in [self._loop_ssbo, self._segment_ssbo]:
+            if buf is not None:
+                try:
+                    buf.release()
+                except Exception:
+                    pass
