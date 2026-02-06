@@ -514,62 +514,68 @@ def _classify_genre(
     Returns (genre_id, confidence, probabilities_7).
     Genre IDs: 0=EDM, 1=Rock, 2=Jazz, 3=Classical, 4=Hip-Hop, 5=Ambient, 6=Pop.
     """
-    # Build 9-dim feature vector from aggregate stats
-    bass_ratio = float(np.mean(bass_raw) / (np.mean(rms_raw) + 1e-8))
-    dynamic_range = float(np.percentile(rms_raw, 95) - np.percentile(rms_raw, 5))
+    # All features computed as 0-1 normalized values
+    total_energy = np.mean(bass_raw) + np.mean(rms_raw) + 1e-8
+    bass_ratio = float(np.clip(np.mean(bass_raw) / total_energy, 0, 1))
+
+    rms_p5, rms_p95 = float(np.percentile(rms_raw, 5)), float(np.percentile(rms_raw, 95))
+    rms_max = float(rms_raw.max()) + 1e-8
+    dynamic_range = float(np.clip((rms_p95 - rms_p5) / rms_max, 0, 1))
+
     onset_rate = float(np.mean(onset_env > np.percentile(onset_env, 70)))
-    centroid_mean = float(np.mean(centroid_raw))
-    centroid_std = float(np.std(centroid_raw))
-    # Harmonic stability: mean chroma max over time (high = clear tonal center)
-    harmonic_stability = float(np.mean(np.max(chroma, axis=0)))
-    # Spectral variance: how much the spectrum changes frame to frame
-    spectral_var = float(np.mean(np.std(chroma, axis=1)))
-    # Chroma repetitiveness: self-similarity of chroma across 8-bar windows
-    window = max(1, int(8 * 60.0 / tempo * fps))
-    if n_frames > window * 2:
+
+    cent_max = float(centroid_raw.max()) + 1e-8
+    centroid_mean_norm = float(np.clip(np.mean(centroid_raw) / cent_max, 0, 1))
+    centroid_cv = float(np.clip(np.std(centroid_raw) / (np.mean(centroid_raw) + 1e-8), 0, 2) / 2.0)
+
+    harmonic_stability = float(np.clip(np.mean(np.max(chroma, axis=0)), 0, 1))
+    spectral_var = float(np.clip(np.mean(np.std(chroma, axis=1)) / 0.5, 0, 1))
+
+    if n_frames > 100:
         half = n_frames // 2
         c1 = np.mean(chroma[:, :half], axis=1)
         c2 = np.mean(chroma[:, half:], axis=1)
-        chroma_rep = float(np.dot(c1, c2) / (np.linalg.norm(c1) * np.linalg.norm(c2) + 1e-8))
+        n1, n2 = np.linalg.norm(c1), np.linalg.norm(c2)
+        chroma_rep = float(np.dot(c1, c2) / (n1 * n2 + 1e-8)) if n1 > 1e-8 and n2 > 1e-8 else 0.5
     else:
         chroma_rep = 0.5
 
     feat = np.array([
-        tempo / 200.0,         # normalized tempo
+        np.clip(tempo / 200.0, 0, 1),  # tempo normalized
         bass_ratio,
         dynamic_range,
         onset_rate,
-        centroid_mean / (centroid_raw.max() + 1e-8),
-        centroid_std / (centroid_mean + 1e-8),
+        centroid_mean_norm,
+        centroid_cv,
         harmonic_stability,
         spectral_var,
         chroma_rep,
     ], dtype=np.float64)
 
-    # Genre prototypes (9-dim each, hand-tuned)
+    # Genre prototypes — all values in 0-1 range
     prototypes = np.array([
-        # EDM: high tempo, strong bass, moderate dynamics, repetitive
-        [0.65, 1.5, 0.4, 0.5, 0.3, 0.3, 0.6, 0.3, 0.8],
-        # Rock: medium tempo, moderate bass, wide dynamics, high onset
-        [0.50, 0.8, 0.7, 0.6, 0.5, 0.5, 0.5, 0.5, 0.5],
-        # Jazz: varied tempo, low bass ratio, high centroid variance
-        [0.45, 0.5, 0.5, 0.4, 0.6, 0.8, 0.4, 0.7, 0.3],
+        # EDM: high tempo, strong bass proportion, moderate dynamics, repetitive
+        [0.65, 0.65, 0.35, 0.50, 0.35, 0.25, 0.55, 0.30, 0.85],
+        # Rock: medium tempo, balanced bass, wide dynamics, high onset
+        [0.55, 0.45, 0.65, 0.55, 0.50, 0.50, 0.45, 0.50, 0.50],
+        # Jazz: varied tempo, low bass proportion, high centroid variance
+        [0.45, 0.35, 0.50, 0.35, 0.60, 0.70, 0.40, 0.65, 0.30],
         # Classical: lower tempo, low bass, wide dynamics, high harmonic stability
-        [0.35, 0.3, 0.8, 0.2, 0.5, 0.6, 0.8, 0.6, 0.4],
-        # Hip-Hop: medium tempo, very strong bass, rhythmic
-        [0.42, 1.8, 0.5, 0.5, 0.3, 0.3, 0.5, 0.3, 0.7],
+        [0.35, 0.25, 0.75, 0.20, 0.55, 0.55, 0.75, 0.55, 0.40],
+        # Hip-Hop: medium tempo, heavy bass proportion, rhythmic
+        [0.45, 0.70, 0.40, 0.50, 0.30, 0.25, 0.45, 0.25, 0.70],
         # Ambient: low tempo, low bass, low dynamics, low onset, high harmonic
-        [0.25, 0.4, 0.2, 0.1, 0.4, 0.3, 0.7, 0.2, 0.6],
-        # Pop: medium tempo, balanced, high vocal, repetitive
-        [0.50, 0.7, 0.5, 0.4, 0.5, 0.4, 0.6, 0.4, 0.7],
+        [0.25, 0.35, 0.20, 0.10, 0.45, 0.30, 0.70, 0.20, 0.65],
+        # Pop: medium tempo, balanced, moderate onset, repetitive
+        [0.55, 0.45, 0.45, 0.40, 0.50, 0.40, 0.55, 0.40, 0.75],
     ], dtype=np.float64)
 
     # Weighted Euclidean distance
-    weights = np.array([1.5, 2.0, 1.0, 1.5, 0.8, 1.0, 1.0, 0.8, 1.2])
+    weights = np.array([1.5, 1.5, 1.2, 1.5, 1.0, 1.2, 1.0, 1.0, 1.2])
     distances = np.sqrt(np.sum(weights * (prototypes - feat) ** 2, axis=1))
 
     # Softmax of negative distances (lower distance = higher prob)
-    neg_dist = -distances * 3.0  # temperature scaling
+    neg_dist = -distances * 4.0  # temperature scaling
     exp_d = np.exp(neg_dist - np.max(neg_dist))
     probs = exp_d / (exp_d.sum() + 1e-8)
 
