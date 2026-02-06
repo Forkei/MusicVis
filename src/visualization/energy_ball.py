@@ -81,10 +81,9 @@ def _pack_loop_data(loops: list[Loop]) -> np.ndarray:
             data[cp_base + 4] = loop.noise_phase[j, 2]
 
         # Rotation matrix (9 floats at offset 120)
+        # GLSL mat3() constructor is column-major, so transpose before flattening
         rm_base = base + 120
-        # mat3 in GLSL is column-major, but we read it row-by-row in the shader
-        # so pack as flat row-major matching our shader's access pattern
-        data[rm_base:rm_base + 9] = loop.rot_matrix.flatten()
+        data[rm_base:rm_base + 9] = loop.rot_matrix.T.flatten()
 
         # Visual properties (4 floats at offset 129)
         vp_base = base + 129
@@ -279,6 +278,9 @@ class EnergyBallGenerator:
         self._segment_ssbo.bind_to_storage_buffer(1)
 
         self._compute.run(group_x=loop_count, group_y=1, group_z=1)
+
+        # Memory barrier: ensure compute writes are visible to vertex shader
+        self.ctx.memory_barrier()
 
         compute_seg_count = loop_count * 240
 

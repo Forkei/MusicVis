@@ -131,6 +131,9 @@ class App:
         # Idle features for when no song is loaded
         self._idle_time_start = time.time()
 
+        # App start time (for relative time in shaders — 32-bit float precision)
+        self._start_time = time.time()
+
         # Delta time tracking
         self._last_frame_time = time.time()
 
@@ -502,7 +505,7 @@ class App:
         self._last_frame_time = now
 
         seg_buffer, compute_count, ring_segs = self.ball_gen.generate(
-            self.width, self.height, now, delta_time, features, settings
+            self.width, self.height, now - self._start_time, delta_time, features, settings
         )
 
         # Add flash and global hue from features to render settings
