@@ -8,7 +8,7 @@ DEFAULT_SETTINGS = {
     "brightness": 2.6,
     "energy_mult": 3.0,
     "bloom_intensity": 5.0,
-    "loop_count": 10,
+    "loop_count": 15,
     "noise_mult": 0.3,
     "rotation_speed": 2.18,
 }
