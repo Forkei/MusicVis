@@ -63,6 +63,37 @@ class AnalysisResult:
     # B7: Mel spectrum for waveform ring
     mel_spectrum: np.ndarray        # (64, n_frames) float32 — 64-bin mel spectrogram
 
+    # --- Musical Director features ---
+
+    # Genre classification
+    genre_id: int                   # 0=EDM,1=Rock,2=Jazz,3=Classical,4=HipHop,5=Ambient,6=Pop
+    genre_confidence: float         # 0-1
+    genre_features: np.ndarray      # (7,) float32 — probability per genre
+
+    # Section typing
+    section_type: np.ndarray        # (n_frames,) int32 — 0=intro..8=solo
+    section_boundaries: np.ndarray  # (N,) int32 — frame indices of section changes
+    n_section_boundaries: int
+
+    # Energy trajectory
+    energy_trajectory: np.ndarray   # (n_frames,) float32 — -1..+1
+
+    # Valence / Arousal
+    valence: np.ndarray             # (n_frames,) float32 — 0=dark, 1=bright
+    arousal: np.ndarray             # (n_frames,) float32 — 0=calm, 1=excited
+
+    # Generalized climax detection
+    climax_score: np.ndarray        # (n_frames,) float32 — 0-1
+    climax_type: np.ndarray         # (n_frames,) int8 — 0=none..5=breakdown_return
+
+    # Look-ahead (pre-computed future awareness)
+    lookahead_energy_delta: np.ndarray   # (n_frames,) float32 — -1..+1
+    lookahead_section_change: np.ndarray # (n_frames,) float32 — 0-1
+    lookahead_climax: np.ndarray         # (n_frames,) float32 — 0-1
+
+    # Rhythmic density
+    rhythmic_density: np.ndarray    # (n_frames,) float32 — 0-1
+
     def frame_at(self, time: float) -> int:
         """Get frame index for a given time in seconds."""
         frame = int(time * self.sr / self.hop_length)
@@ -91,6 +122,19 @@ class AnalysisResult:
             "groove_factor": self.groove_factor,
             "section_id": int(self.section_labels[f]),
             "tempo": self.tempo,
+            # Musical Director features
+            "genre_id": self.genre_id,
+            "genre_confidence": self.genre_confidence,
+            "section_type": int(self.section_type[f]),
+            "energy_trajectory": float(self.energy_trajectory[f]),
+            "valence": float(self.valence[f]),
+            "arousal": float(self.arousal[f]),
+            "climax_score": float(self.climax_score[f]),
+            "climax_type": int(self.climax_type[f]),
+            "lookahead_energy_delta": float(self.lookahead_energy_delta[f]),
+            "lookahead_section_change": float(self.lookahead_section_change[f]),
+            "lookahead_climax": float(self.lookahead_climax[f]),
+            "rhythmic_density": float(self.rhythmic_density[f]),
         }
 
 
@@ -359,6 +403,53 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
         bass_raw, rms_raw, onset_env, cent, n_frames, fps
     )
 
+    report(0.82)
+
+    # --- Genre classification ---
+    genre_id, genre_confidence, genre_features = _classify_genre(
+        tempo_val, bass_raw, rms_raw, onset_env, cent, chroma_cqt, n_frames, fps
+    )
+
+    report(0.84)
+
+    # --- Section type labeling ---
+    section_type, section_boundaries_arr, n_section_boundaries = _label_sections(
+        section_labels, rms, spectral_centroid, onset_strength, bass_energy,
+        vocal_presence, n_frames, fps, genre_id, duration
+    )
+
+    report(0.87)
+
+    # --- Generalized climax detection ---
+    climax_score, climax_type = _detect_climaxes_general(
+        rms, onset_strength, spectral_centroid, bass_energy,
+        vocal_presence, spectral_flux, section_type, n_frames, fps, genre_id
+    )
+
+    report(0.90)
+
+    # --- Energy trajectory ---
+    energy_trajectory = _compute_energy_trajectory(rms_raw, n_frames, fps)
+
+    report(0.92)
+
+    # --- Valence / Arousal ---
+    valence_arr, arousal_arr = _compute_valence_arousal(
+        chroma_cqt, cent, rms, spectral_flux, tempo_val, n_frames, fps
+    )
+
+    report(0.94)
+
+    # --- Rhythmic density ---
+    rhythmic_density = _compute_rhythmic_density(onset_env, tempo_val, n_frames, fps)
+
+    report(0.96)
+
+    # --- Look-ahead features ---
+    lookahead_energy_delta, lookahead_section_change, lookahead_climax = _compute_lookahead(
+        rms, section_boundaries_arr, climax_score, n_frames, fps
+    )
+
     report(1.0)
 
     return AnalysisResult(
@@ -389,6 +480,408 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
         groove_factor=groove_factor,
         tempo=tempo_val,
         mel_spectrum=mel_spectrum,
+        # Musical Director features
+        genre_id=genre_id,
+        genre_confidence=genre_confidence,
+        genre_features=genre_features.astype(np.float32),
+        section_type=section_type.astype(np.int32),
+        section_boundaries=section_boundaries_arr.astype(np.int32),
+        n_section_boundaries=n_section_boundaries,
+        energy_trajectory=energy_trajectory.astype(np.float32),
+        valence=valence_arr.astype(np.float32),
+        arousal=arousal_arr.astype(np.float32),
+        climax_score=climax_score.astype(np.float32),
+        climax_type=climax_type.astype(np.int8),
+        lookahead_energy_delta=lookahead_energy_delta.astype(np.float32),
+        lookahead_section_change=lookahead_section_change.astype(np.float32),
+        lookahead_climax=lookahead_climax.astype(np.float32),
+        rhythmic_density=rhythmic_density.astype(np.float32),
+    )
+
+
+def _classify_genre(
+    tempo: float,
+    bass_raw: np.ndarray,
+    rms_raw: np.ndarray,
+    onset_env: np.ndarray,
+    centroid_raw: np.ndarray,
+    chroma: np.ndarray,
+    n_frames: int,
+    fps: float,
+) -> tuple[int, float, np.ndarray]:
+    """Classify genre from aggregate audio statistics.
+
+    Returns (genre_id, confidence, probabilities_7).
+    Genre IDs: 0=EDM, 1=Rock, 2=Jazz, 3=Classical, 4=Hip-Hop, 5=Ambient, 6=Pop.
+    """
+    # Build 9-dim feature vector from aggregate stats
+    bass_ratio = float(np.mean(bass_raw) / (np.mean(rms_raw) + 1e-8))
+    dynamic_range = float(np.percentile(rms_raw, 95) - np.percentile(rms_raw, 5))
+    onset_rate = float(np.mean(onset_env > np.percentile(onset_env, 70)))
+    centroid_mean = float(np.mean(centroid_raw))
+    centroid_std = float(np.std(centroid_raw))
+    # Harmonic stability: mean chroma max over time (high = clear tonal center)
+    harmonic_stability = float(np.mean(np.max(chroma, axis=0)))
+    # Spectral variance: how much the spectrum changes frame to frame
+    spectral_var = float(np.mean(np.std(chroma, axis=1)))
+    # Chroma repetitiveness: self-similarity of chroma across 8-bar windows
+    window = max(1, int(8 * 60.0 / tempo * fps))
+    if n_frames > window * 2:
+        half = n_frames // 2
+        c1 = np.mean(chroma[:, :half], axis=1)
+        c2 = np.mean(chroma[:, half:], axis=1)
+        chroma_rep = float(np.dot(c1, c2) / (np.linalg.norm(c1) * np.linalg.norm(c2) + 1e-8))
+    else:
+        chroma_rep = 0.5
+
+    feat = np.array([
+        tempo / 200.0,         # normalized tempo
+        bass_ratio,
+        dynamic_range,
+        onset_rate,
+        centroid_mean / (centroid_raw.max() + 1e-8),
+        centroid_std / (centroid_mean + 1e-8),
+        harmonic_stability,
+        spectral_var,
+        chroma_rep,
+    ], dtype=np.float64)
+
+    # Genre prototypes (9-dim each, hand-tuned)
+    prototypes = np.array([
+        # EDM: high tempo, strong bass, moderate dynamics, repetitive
+        [0.65, 1.5, 0.4, 0.5, 0.3, 0.3, 0.6, 0.3, 0.8],
+        # Rock: medium tempo, moderate bass, wide dynamics, high onset
+        [0.50, 0.8, 0.7, 0.6, 0.5, 0.5, 0.5, 0.5, 0.5],
+        # Jazz: varied tempo, low bass ratio, high centroid variance
+        [0.45, 0.5, 0.5, 0.4, 0.6, 0.8, 0.4, 0.7, 0.3],
+        # Classical: lower tempo, low bass, wide dynamics, high harmonic stability
+        [0.35, 0.3, 0.8, 0.2, 0.5, 0.6, 0.8, 0.6, 0.4],
+        # Hip-Hop: medium tempo, very strong bass, rhythmic
+        [0.42, 1.8, 0.5, 0.5, 0.3, 0.3, 0.5, 0.3, 0.7],
+        # Ambient: low tempo, low bass, low dynamics, low onset, high harmonic
+        [0.25, 0.4, 0.2, 0.1, 0.4, 0.3, 0.7, 0.2, 0.6],
+        # Pop: medium tempo, balanced, high vocal, repetitive
+        [0.50, 0.7, 0.5, 0.4, 0.5, 0.4, 0.6, 0.4, 0.7],
+    ], dtype=np.float64)
+
+    # Weighted Euclidean distance
+    weights = np.array([1.5, 2.0, 1.0, 1.5, 0.8, 1.0, 1.0, 0.8, 1.2])
+    distances = np.sqrt(np.sum(weights * (prototypes - feat) ** 2, axis=1))
+
+    # Softmax of negative distances (lower distance = higher prob)
+    neg_dist = -distances * 3.0  # temperature scaling
+    exp_d = np.exp(neg_dist - np.max(neg_dist))
+    probs = exp_d / (exp_d.sum() + 1e-8)
+
+    genre_id = int(np.argmax(probs))
+    genre_confidence = float(probs[genre_id])
+    return genre_id, genre_confidence, probs.astype(np.float32)
+
+
+def _label_sections(
+    section_labels: np.ndarray,
+    rms: np.ndarray,
+    centroid: np.ndarray,
+    onset: np.ndarray,
+    bass: np.ndarray,
+    vocal: np.ndarray,
+    n_frames: int,
+    fps: float,
+    genre_id: int,
+    duration: float,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Label section clusters into meaningful types.
+
+    Section types: 0=intro, 1=verse, 2=chorus, 3=bridge, 4=breakdown,
+                   5=buildup, 6=drop, 7=outro, 8=solo.
+    Returns (section_type_per_frame, boundary_frames, n_boundaries).
+    """
+    # Find boundaries where cluster ID changes
+    changes = np.where(np.diff(section_labels) != 0)[0] + 1
+    boundaries = np.concatenate([[0], changes])
+    n_boundaries = len(changes)
+
+    # Compute per-section aggregate features
+    section_type = np.zeros(n_frames, dtype=np.int32)
+    n_sections = len(boundaries)
+
+    for sec_idx in range(n_sections):
+        start = boundaries[sec_idx]
+        end = boundaries[sec_idx + 1] if sec_idx + 1 < n_sections else n_frames
+
+        seg_rms = float(np.mean(rms[start:end]))
+        seg_cent = float(np.mean(centroid[start:end]))
+        seg_onset = float(np.mean(onset[start:end]))
+        seg_bass = float(np.mean(bass[start:end]))
+        seg_vocal = float(np.mean(vocal[start:end]))
+        seg_pos = (start + end) / 2.0 / n_frames  # position in song (0-1)
+
+        # Energy trajectory within section
+        seg_len = end - start
+        if seg_len > int(fps * 2):
+            first_q = float(np.mean(rms[start:start + seg_len // 4]))
+            last_q = float(np.mean(rms[end - seg_len // 4:end]))
+            energy_rising = last_q - first_q
+        else:
+            energy_rising = 0.0
+
+        # Rule-based labeling
+        stype = 1  # default = verse
+
+        if sec_idx == 0 and seg_pos < 0.15 and seg_rms < 0.4:
+            stype = 0  # intro
+        elif sec_idx == n_sections - 1 and seg_pos > 0.85 and seg_rms < 0.4:
+            stype = 7  # outro
+        elif genre_id == 0 and seg_bass > 0.6 and seg_rms > 0.6:
+            stype = 6  # drop (EDM)
+        elif seg_rms < 0.25 and seg_onset < 0.25:
+            stype = 4  # breakdown
+        elif energy_rising > 0.15 and seg_onset > 0.4:
+            stype = 5  # buildup
+        elif seg_rms > 0.55 and (seg_vocal > 0.5 or seg_cent > 0.5):
+            stype = 2  # chorus
+        elif seg_cent > 0.6 and seg_vocal < 0.3:
+            stype = 8  # solo
+        elif seg_rms < 0.45 and seg_onset < 0.35:
+            # Check if this cluster ID appears rarely (bridge)
+            cluster_id = section_labels[start]
+            cluster_count = np.sum(section_labels == cluster_id)
+            if cluster_count < n_frames * 0.15:
+                stype = 3  # bridge
+
+        section_type[start:end] = stype
+
+    # Boundary array (frame indices where section changes)
+    boundary_arr = changes.astype(np.int32) if len(changes) > 0 else np.zeros(1, dtype=np.int32)
+
+    return section_type, boundary_arr, n_boundaries
+
+
+def _detect_climaxes_general(
+    rms: np.ndarray,
+    onset: np.ndarray,
+    centroid: np.ndarray,
+    bass: np.ndarray,
+    vocal: np.ndarray,
+    flux: np.ndarray,
+    section_type: np.ndarray,
+    n_frames: int,
+    fps: float,
+    genre_id: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Multi-signal climax scoring with genre-specific weights.
+
+    Returns (climax_score, climax_type) arrays.
+    Climax types: 0=none, 1=drop, 2=chorus_peak, 3=crescendo, 4=solo_peak, 5=breakdown_return.
+    """
+    smooth_w = max(3, int(1.0 * fps))
+
+    # Compute novelty signals (derivative + positive clip + smooth)
+    def _novelty(arr):
+        d = np.gradient(uniform_filter1d(arr, smooth_w))
+        d = np.clip(d, 0, None)
+        d = uniform_filter1d(d, max(3, int(0.5 * fps)))
+        mx = d.max()
+        return d / mx if mx > 1e-8 else d
+
+    energy_nov = _novelty(rms)
+    spectral_nov = _novelty(centroid)
+    onset_nov = _novelty(onset)
+    vocal_nov = _novelty(vocal)
+    bass_nov = _novelty(bass)
+
+    # Genre-specific weights: [energy, spectral, onset, vocal, bass]
+    genre_weights = {
+        0: [0.20, 0.10, 0.20, 0.15, 0.35],  # EDM: bass-heavy
+        1: [0.30, 0.15, 0.25, 0.15, 0.15],  # Rock: balanced
+        2: [0.20, 0.30, 0.15, 0.10, 0.25],  # Jazz: spectral
+        3: [0.40, 0.25, 0.10, 0.10, 0.15],  # Classical: energy
+        4: [0.20, 0.10, 0.25, 0.25, 0.20],  # Hip-Hop: vocal+onset
+        5: [0.35, 0.30, 0.05, 0.15, 0.15],  # Ambient: energy+spectral
+        6: [0.20, 0.15, 0.15, 0.30, 0.20],  # Pop: vocal-driven
+    }
+    w = genre_weights.get(genre_id, genre_weights[6])
+
+    climax_score = (
+        energy_nov * w[0]
+        + spectral_nov * w[1]
+        + onset_nov * w[2]
+        + vocal_nov * w[3]
+        + bass_nov * w[4]
+    )
+
+    # Normalize to 0-1
+    mx = climax_score.max()
+    if mx > 1e-8:
+        climax_score = climax_score / mx
+
+    # Smooth
+    climax_score = uniform_filter1d(climax_score, max(3, int(0.5 * fps)))
+
+    # Determine climax type based on section context
+    climax_type = np.zeros(n_frames, dtype=np.int8)
+    threshold = 0.3
+
+    for i in range(n_frames):
+        if climax_score[i] < threshold:
+            continue
+        st = section_type[i]
+        if st == 6:  # drop
+            climax_type[i] = 1
+        elif st == 2:  # chorus
+            climax_type[i] = 2
+        elif st == 5:  # buildup
+            climax_type[i] = 3  # crescendo
+        elif st == 8:  # solo
+            climax_type[i] = 4
+        elif st == 4:  # breakdown — if score is high it's a return
+            climax_type[i] = 5
+        else:
+            # Generic climax
+            climax_type[i] = 2 if climax_score[i] > 0.6 else 0
+
+    return climax_score, climax_type
+
+
+def _compute_energy_trajectory(
+    rms_raw: np.ndarray, n_frames: int, fps: float
+) -> np.ndarray:
+    """Smoothed RMS derivative normalized to -1..+1."""
+    smooth_w = max(3, int(2.0 * fps))
+    smoothed = uniform_filter1d(rms_raw, smooth_w)
+    deriv = np.gradient(smoothed)
+    # Normalize to -1..+1
+    mx = max(abs(deriv.min()), abs(deriv.max()), 1e-8)
+    trajectory = np.clip(deriv / mx, -1.0, 1.0)
+    return _fit_length(trajectory, n_frames)
+
+
+def _compute_valence_arousal(
+    chroma: np.ndarray,
+    centroid_raw: np.ndarray,
+    rms: np.ndarray,
+    flux: np.ndarray,
+    tempo: float,
+    n_frames: int,
+    fps: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute valence (major/minor brightness) and arousal (energy/excitement).
+
+    Valence: correlation with major/minor templates + spectral warmth.
+    Arousal: composite of tempo, rms, spectral flux.
+    """
+    # Major and minor templates (pitch class profiles)
+    major = np.array([1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1], dtype=np.float64)
+    minor = np.array([1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0], dtype=np.float64)
+    major = major / np.linalg.norm(major)
+    minor = minor / np.linalg.norm(minor)
+
+    valence = np.zeros(n_frames, dtype=np.float64)
+    for f in range(n_frames):
+        c = chroma[:, f].astype(np.float64)
+        cn = np.linalg.norm(c)
+        if cn < 1e-8:
+            valence[f] = 0.5
+            continue
+        c = c / cn
+        # Best correlation across all rotations (key detection)
+        best_major = max(np.dot(np.roll(major, k), c) for k in range(12))
+        best_minor = max(np.dot(np.roll(minor, k), c) for k in range(12))
+        # Major = bright/positive, minor = dark
+        valence[f] = 0.5 + (best_major - best_minor) * 0.5
+
+    # Add spectral warmth component
+    cent_norm = centroid_raw / (centroid_raw.max() + 1e-8)
+    cent_norm = _fit_length(cent_norm, n_frames)
+    valence = valence * 0.7 + cent_norm * 0.3
+    valence = np.clip(valence, 0.0, 1.0)
+
+    # Smooth
+    smooth_w = max(3, int(2.0 * fps))
+    valence = uniform_filter1d(valence, smooth_w)
+
+    # Arousal: tempo + rms + flux composite
+    tempo_component = np.clip((tempo - 60) / 120.0, 0.0, 1.0)
+    rms_component = _fit_length(rms, n_frames)
+    flux_component = _fit_length(flux, n_frames)
+    arousal = tempo_component * 0.2 + rms_component * 0.5 + flux_component * 0.3
+    arousal = np.clip(arousal, 0.0, 1.0)
+    arousal = uniform_filter1d(arousal, smooth_w)
+
+    return valence.astype(np.float32), arousal.astype(np.float32)
+
+
+def _compute_rhythmic_density(
+    onset_env: np.ndarray, tempo: float, n_frames: int, fps: float
+) -> np.ndarray:
+    """Windowed onset count per beat-length window, normalized 0-1."""
+    beat_frames = max(1, int(60.0 / tempo * fps))
+    threshold = np.percentile(onset_env, 60)
+    onset_binary = (onset_env > threshold).astype(np.float64)
+    onset_binary = _fit_length(onset_binary, n_frames)
+    density = uniform_filter1d(onset_binary, beat_frames)
+    mx = density.max()
+    if mx > 1e-8:
+        density = density / mx
+    return np.clip(density, 0.0, 1.0).astype(np.float32)
+
+
+def _compute_lookahead(
+    rms: np.ndarray,
+    section_boundaries: np.ndarray,
+    climax_score: np.ndarray,
+    n_frames: int,
+    fps: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Pre-computed look-ahead features (future awareness from pre-analysis).
+
+    energy_delta: rms 2s ahead minus rms now
+    section_change: 0-1 ramp over 3s before each boundary
+    climax_proximity: 0-1 ramp over 4s before each climax peak
+    """
+    # Energy delta: shift rms backward by 2s
+    shift = max(1, int(2.0 * fps))
+    rms_future = np.roll(rms, -shift)
+    rms_future[-shift:] = rms[-shift:]  # clamp end
+    energy_delta = np.clip(rms_future - rms, -1.0, 1.0)
+
+    # Section change proximity: 3s ramp before each boundary
+    section_change = np.zeros(n_frames, dtype=np.float64)
+    ramp_len = max(1, int(3.0 * fps))
+    for b in section_boundaries:
+        if b <= 0 or b >= n_frames:
+            continue
+        start = max(0, b - ramp_len)
+        for f in range(start, b):
+            t = (f - start) / ramp_len
+            section_change[f] = max(section_change[f], t)
+
+    # Climax proximity: 4s ramp before each climax peak (score > 0.5)
+    climax_prox = np.zeros(n_frames, dtype=np.float64)
+    ramp_len_c = max(1, int(4.0 * fps))
+    # Find climax peaks
+    threshold = 0.5
+    in_peak = False
+    peak_frames = []
+    for i in range(n_frames):
+        if climax_score[i] > threshold and not in_peak:
+            in_peak = True
+            peak_start = i
+        elif climax_score[i] <= threshold and in_peak:
+            in_peak = False
+            # Peak is at the max within this region
+            peak_frames.append(peak_start + int(np.argmax(climax_score[peak_start:i])))
+
+    for pf in peak_frames:
+        start = max(0, pf - ramp_len_c)
+        for f in range(start, pf):
+            t = (f - start) / ramp_len_c
+            climax_prox[f] = max(climax_prox[f], t)
+
+    return (
+        energy_delta.astype(np.float32),
+        section_change.astype(np.float32),
+        climax_prox.astype(np.float32),
     )
 
 

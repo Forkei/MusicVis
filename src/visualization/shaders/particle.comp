@@ -1,0 +1,81 @@
+#version 430 core
+
+layout(local_size_x = 256) in;
+
+// Particle state: x, y, vx, vy, life, max_life, brightness, hue
+layout(std430, binding = 0) buffer ParticleState {
+    float particles[];
+};
+
+// Output segments: x0, y0, x1, y1, thickness, brightness, hue, depth
+layout(std430, binding = 1) buffer ParticleSegments {
+    float segments[];
+};
+
+uniform float u_dt;
+uniform float u_drag;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint base = idx * 8;
+    uint seg_base = idx * 8;
+
+    float x    = particles[base + 0];
+    float y    = particles[base + 1];
+    float vx   = particles[base + 2];
+    float vy   = particles[base + 3];
+    float life = particles[base + 4];
+    float max_life = particles[base + 5];
+    float bright = particles[base + 6];
+    float hue  = particles[base + 7];
+
+    if (life <= 0.0) {
+        // Dead particle — write invisible segment
+        segments[seg_base + 0] = 0.0;
+        segments[seg_base + 1] = 0.0;
+        segments[seg_base + 2] = 0.0;
+        segments[seg_base + 3] = 0.0;
+        segments[seg_base + 4] = 0.0;
+        segments[seg_base + 5] = 0.0;
+        segments[seg_base + 6] = 0.0;
+        segments[seg_base + 7] = 0.0;
+        return;
+    }
+
+    // Update position
+    x += vx * u_dt;
+    y += vy * u_dt;
+
+    // Apply drag
+    vx *= (1.0 - u_drag * u_dt);
+    vy *= (1.0 - u_drag * u_dt);
+
+    // Decrement life
+    life -= u_dt;
+
+    // Write back
+    particles[base + 0] = x;
+    particles[base + 1] = y;
+    particles[base + 2] = vx;
+    particles[base + 3] = vy;
+    particles[base + 4] = life;
+
+    // Compute brightness fade
+    float life_ratio = clamp(life / max(max_life, 0.001), 0.0, 1.0);
+    float fade = life_ratio * life_ratio; // quadratic fade
+    float final_bright = bright * fade;
+
+    // Motion-blur line: current pos to pos + velocity * 16ms
+    float x1 = x + vx * 0.016;
+    float y1 = y + vy * 0.016;
+
+    // Write output segment
+    segments[seg_base + 0] = x;
+    segments[seg_base + 1] = y;
+    segments[seg_base + 2] = x1;
+    segments[seg_base + 3] = y1;
+    segments[seg_base + 4] = 1.5;           // thickness
+    segments[seg_base + 5] = final_bright;
+    segments[seg_base + 6] = hue;
+    segments[seg_base + 7] = 0.3;           // depth
+}

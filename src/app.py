@@ -19,6 +19,8 @@ from src.audio.player import AudioPlayer
 from src.audio.cookie_helper import cookies_exist, open_login_browser, export_cookies
 from src.visualization.renderer import Renderer
 from src.visualization.energy_ball import EnergyBallGenerator
+from src.visualization.director import MusicalDirector
+from src.visualization.particles import ParticleSystem, MAX_PARTICLES
 from src.audio.library import SongLibrary
 from src.ui.search_panel import SearchPanel
 from src.ui.player_controls import PlayerControls
@@ -106,9 +108,11 @@ class App:
         style.frame_rounding = 4.0
         style.grab_rounding = 3.0
 
-        # Renderer + generator
+        # Renderer + generator + director + particles
         self.renderer = Renderer(self.ctx, width, height)
         self.ball_gen = EnergyBallGenerator(self.ctx)
+        self.director = MusicalDirector()
+        self.particles = ParticleSystem(self.ctx)
 
         # UI panels
         self.search_panel = SearchPanel()
@@ -130,6 +134,7 @@ class App:
 
         # Idle features for when no song is loaded
         self._idle_time_start = time.time()
+        self._last_directed_settings = {}
 
         # App start time (for relative time in shaders — 32-bit float precision)
         self._start_time = time.time()
@@ -322,6 +327,7 @@ class App:
 
         self._current_entry = entry
         self.current_song_title = entry.get("title", "Unknown")
+        self.director.reset()
 
         # Try loading cached analysis
         cached = self.library.load_analysis(entry)
@@ -464,6 +470,10 @@ class App:
         # Settings
         self.settings_panel.draw()
 
+        # Director status overlay
+        if self.settings_panel.settings.get("director_enabled", True):
+            self.settings_panel.draw_director_status(self._last_directed_settings)
+
         # Library panel (allows switching songs while playing)
         lib_action = self.library_panel.draw(self.library.get_all())
         if lib_action:
@@ -504,16 +514,39 @@ class App:
         delta_time = min(now - self._last_frame_time, 0.05)
         self._last_frame_time = now
 
+        # Musical Director: modulate settings based on musical context
+        directed_settings = self.director.process(features, settings, delta_time)
+        self._last_directed_settings = directed_settings
+
         seg_buffer, compute_count, ring_segs = self.ball_gen.generate(
-            self.width, self.height, now - self._start_time, delta_time, features, settings
+            self.width, self.height, now - self._start_time, delta_time, features, directed_settings
         )
 
         # Add flash and global hue from features to render settings
-        render_settings = dict(settings)
+        render_settings = dict(directed_settings)
         render_settings["flash"] = features.get("onset_strength", 0.0)
         render_settings["global_hue"] = features.get("spectral_centroid", 0.5) * 0.65
 
-        self.renderer.render(seg_buffer, compute_count, ring_segs, render_settings, delta_time)
+        # Update particles
+        ball_cx, ball_cy = self.width / 2, self.height / 2
+        ball_radius = self.ball_gen._current_radius
+        self.particles.update(delta_time, features, directed_settings,
+                              ball_cx, ball_cy, ball_radius)
+        particle_buffer = self.particles.segment_buffer
+        particle_count = MAX_PARTICLES
+
+        # Render with or without trails
+        trail_decay = directed_settings.get("trail_decay", 0.0)
+        if trail_decay > 0.01:
+            self.renderer.render_with_trail(
+                seg_buffer, compute_count, ring_segs, render_settings,
+                trail_decay, delta_time, particle_buffer, particle_count
+            )
+        else:
+            self.renderer.render(
+                seg_buffer, compute_count, ring_segs, render_settings,
+                delta_time, particle_buffer, particle_count
+            )
 
     def _get_current_features(self) -> dict:
         """Get audio features for current playback position."""
@@ -543,11 +576,25 @@ class App:
             "groove_factor": 0.0,
             "section_id": 0,
             "tempo": 120.0,
+            # Musical Director features (neutral defaults)
+            "genre_id": 6,  # Pop (neutral)
+            "genre_confidence": 0.0,
+            "section_type": 0,
+            "energy_trajectory": 0.0,
+            "valence": 0.5,
+            "arousal": 0.2,
+            "climax_score": 0.0,
+            "climax_type": 0,
+            "lookahead_energy_delta": 0.0,
+            "lookahead_section_change": 0.0,
+            "lookahead_climax": 0.0,
+            "rhythmic_density": 0.0,
         }
 
     def _cleanup(self):
         self.player.cleanup()
         self.ball_gen.cleanup()
+        self.particles.cleanup()
         self.renderer.cleanup()
         self.imgui_impl.shutdown()
         imgui.destroy_context()

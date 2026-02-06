@@ -15,6 +15,16 @@ DEFAULT_SETTINGS = {
     "show_ring": True,
     "ring_opacity": 0.5,
     "anamorphic_flare": 0.3,
+    # Musical Director
+    "director_enabled": True,
+    "director_intensity": 0.8,
+    "section_transitions": True,
+    "climax_reactions": True,
+    "beat_sync": True,
+    "auto_trail": True,
+    "auto_particles": True,
+    "trail_decay_manual": 0.0,
+    "particle_rate_manual": 0.0,
 }
 
 
@@ -139,6 +149,76 @@ class SettingsPanel:
                     self.settings["ring_opacity"] = val
                     self._current_preset = ""
 
+            # Musical Director
+            if imgui.collapsing_header("Musical Director", imgui.TreeNodeFlags_.default_open):
+                changed, val = imgui.checkbox(
+                    "Enable Director", self.settings["director_enabled"]
+                )
+                if changed:
+                    self.settings["director_enabled"] = val
+                    self._current_preset = ""
+
+                if self.settings["director_enabled"]:
+                    changed, val = imgui.slider_float(
+                        "Intensity", self.settings["director_intensity"], 0.0, 1.0
+                    )
+                    if changed:
+                        self.settings["director_intensity"] = val
+                        self._current_preset = ""
+
+                    changed, val = imgui.checkbox(
+                        "Section Transitions", self.settings["section_transitions"]
+                    )
+                    if changed:
+                        self.settings["section_transitions"] = val
+                        self._current_preset = ""
+
+                    changed, val = imgui.checkbox(
+                        "Climax Reactions", self.settings["climax_reactions"]
+                    )
+                    if changed:
+                        self.settings["climax_reactions"] = val
+                        self._current_preset = ""
+
+                    changed, val = imgui.checkbox(
+                        "Beat Sync", self.settings["beat_sync"]
+                    )
+                    if changed:
+                        self.settings["beat_sync"] = val
+                        self._current_preset = ""
+
+                    imgui.separator()
+
+                    changed, val = imgui.checkbox(
+                        "Auto Trail", self.settings["auto_trail"]
+                    )
+                    if changed:
+                        self.settings["auto_trail"] = val
+                        self._current_preset = ""
+
+                    if not self.settings["auto_trail"]:
+                        changed, val = imgui.slider_float(
+                            "Trail Decay", self.settings["trail_decay_manual"], 0.0, 0.98
+                        )
+                        if changed:
+                            self.settings["trail_decay_manual"] = val
+                            self._current_preset = ""
+
+                    changed, val = imgui.checkbox(
+                        "Auto Particles", self.settings["auto_particles"]
+                    )
+                    if changed:
+                        self.settings["auto_particles"] = val
+                        self._current_preset = ""
+
+                    if not self.settings["auto_particles"]:
+                        changed, val = imgui.slider_float(
+                            "Particle Rate", self.settings["particle_rate_manual"], 0.0, 1.0
+                        )
+                        if changed:
+                            self.settings["particle_rate_manual"] = val
+                            self._current_preset = ""
+
             # Reset button
             imgui.separator()
             if imgui.button("Reset Defaults"):
@@ -147,6 +227,43 @@ class SettingsPanel:
 
         imgui.end()
         return self.settings
+
+    def draw_director_status(self, settings: dict):
+        """Draw director status overlay at top-center during playback."""
+        genre = settings.get("director_genre", "")
+        if not genre:
+            return
+
+        section = settings.get("director_section", "")
+        climax = settings.get("director_climax", 0.0)
+
+        label = f"{genre} | {section} | Climax: {int(climax * 100)}%"
+
+        viewport = imgui.get_main_viewport()
+        vp_size = viewport.size
+        text_size = imgui.calc_text_size(label)
+        win_w = text_size.x + 24
+        win_h = 30
+
+        imgui.set_next_window_pos(
+            ((vp_size.x - win_w) / 2, 8),
+            imgui.Cond_.always,
+        )
+        imgui.set_next_window_size((win_w, win_h), imgui.Cond_.always)
+        imgui.set_next_window_bg_alpha(0.5)
+
+        flags = (
+            imgui.WindowFlags_.no_title_bar
+            | imgui.WindowFlags_.no_resize
+            | imgui.WindowFlags_.no_move
+            | imgui.WindowFlags_.no_scrollbar
+            | imgui.WindowFlags_.no_focus_on_appearing
+            | imgui.WindowFlags_.no_inputs
+        )
+        expanded, _ = imgui.begin("##director_status", None, flags)
+        if expanded:
+            imgui.text(label)
+        imgui.end()
 
     def _draw_preset_ui(self):
         """Draw preset combo and save button."""

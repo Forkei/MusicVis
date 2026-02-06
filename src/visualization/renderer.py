@@ -49,6 +49,12 @@ class Renderer:
             fragment_shader=_load_shader("composite.frag"),
         )
 
+        # Trail compositing program
+        self.trail_prog = self.ctx.program(
+            vertex_shader=_load_shader("blur.vert"),
+            fragment_shader=_load_shader("trail.frag"),
+        )
+
     def _build_framebuffers(self, w: int, h: int):
         # HDR scene FBO with MRT (scene + bright pass)
         self.scene_tex = self.ctx.texture((w, h), 4, dtype="f2")
@@ -76,6 +82,13 @@ class Renderer:
         self.anamorphic_w = aw
         self.anamorphic_h = ah
 
+        # Trail FBOs (ping-pong at full resolution)
+        self.trail_texA = self.ctx.texture((w, h), 4, dtype="f2")
+        self.trail_texB = self.ctx.texture((w, h), 4, dtype="f2")
+        self.trail_fboA = self.ctx.framebuffer(color_attachments=[self.trail_texA])
+        self.trail_fboB = self.ctx.framebuffer(color_attachments=[self.trail_texB])
+        self._trail_ping = 0  # 0 = A is current, 1 = B is current
+
     def _build_geometry(self):
         # Base quad for instanced line rendering: 6 vertices (2 triangles)
         quad = np.array([
@@ -102,6 +115,9 @@ class Renderer:
         self._composite_vao = self.ctx.vertex_array(
             self.composite_prog, [(self._fsq_vbo, "2f", "in_position")]
         )
+        self._trail_vao = self.ctx.vertex_array(
+            self.trail_prog, [(self._fsq_vbo, "2f", "in_position")]
+        )
 
     def resize(self, width: int, height: int):
         """Resize framebuffers on window resize."""
@@ -117,36 +133,34 @@ class Renderer:
         objs.extend([
             self.anamorphic_texA, self.anamorphic_texB,
             self.anamorphic_fboA, self.anamorphic_fboB,
+            self.trail_texA, self.trail_texB,
+            self.trail_fboA, self.trail_fboB,
         ])
         for obj in objs:
             obj.release()
 
         self._build_framebuffers(width, height)
 
-    def render(self, segment_buffer: moderngl.Buffer, compute_count: int,
-               ring_segments: np.ndarray | None, settings: dict,
-               delta_time: float = 0.016):
-        """Render one frame.
-
-        Args:
-            segment_buffer: SSBO containing compute-generated segments (used as instance VBO)
-            compute_count: Number of segments from compute shader
-            ring_segments: Optional (N, 8) float32 array of ring segments from CPU
-            settings: dict with rendering params
-            delta_time: time since last frame in seconds
-        """
-        # --- Pass 1: Render lines to HDR FBO ---
+    def _render_scene(self, segment_buffer: moderngl.Buffer, compute_count: int,
+                      ring_segments: np.ndarray | None,
+                      particle_buffer: moderngl.Buffer | None,
+                      particle_count: int,
+                      settings: dict):
+        """Render lines (ball + ring + particles) to the HDR scene FBO."""
         self.scene_fbo.use()
         self.ctx.clear(0.0, 0.0, 0.0, 1.0)
 
         bloom_tint = settings.get("bloom_tint", (0.3, 0.6, 1.0))
         depth_fog = settings.get("depth_fog", 0.4)
 
-        # Set shared uniforms
+        # Apply director hue shift to global hue
+        global_hue = settings.get("global_hue", 0.5)
+        global_hue += settings.get("director_hue_shift", 0.0)
+
         self.line_prog["u_resolution"].value = (float(self.width), float(self.height))
         self.line_prog["u_flash"].value = settings.get("flash", 0.0)
         self.line_prog["u_base_brightness"].value = settings.get("brightness", 1.2)
-        self.line_prog["u_global_hue"].value = settings.get("global_hue", 0.5)
+        self.line_prog["u_global_hue"].value = global_hue
         self.line_prog["u_depth_fog"].value = depth_fog
         self.line_prog["u_fog_color"].value = bloom_tint
 
@@ -190,11 +204,30 @@ class Renderer:
             ring_vao.render(moderngl.TRIANGLES, instances=n_ring)
             ring_vao.release()
 
+        # Render particle segments
+        if particle_count > 0 and particle_buffer is not None:
+            p_vao = self.ctx.vertex_array(
+                self.line_prog,
+                [
+                    (self._quad_vbo, "2f", "in_position"),
+                    (particle_buffer, "2f 2f 1f 1f 1f 1f /i",
+                     "in_p0", "in_p1", "in_thickness", "in_brightness",
+                     "in_hue", "in_depth"),
+                ],
+            )
+            p_vao.render(moderngl.TRIANGLES, instances=particle_count)
+            p_vao.release()
+
         self.ctx.disable(moderngl.BLEND)
 
-        # --- Pass 2: Multi-scale bloom ---
+    def _render_bloom_composite(self, settings: dict, target_fbo=None):
+        """Run bloom + anamorphic + composite passes.
+
+        If target_fbo is None, composites to screen. Otherwise to the given FBO.
+        """
         bloom_iterations = 4
         bloom_intensity = settings.get("bloom_intensity", 2.5)
+        bloom_tint = settings.get("bloom_tint", (0.3, 0.6, 1.0))
 
         for scale_idx, (texA, texB, fboA, fboB, bw, bh) in enumerate(self.bloom_scales):
             fboA.use()
@@ -218,7 +251,7 @@ class Renderer:
                 self.blur_prog["u_direction"].value = (0.0, 1.0 / bh)
                 self._blur_vao.render(moderngl.TRIANGLES)
 
-        # --- Pass 2b: Anamorphic lens flare ---
+        # Anamorphic lens flare
         anamorphic_intensity = settings.get("anamorphic_flare", 0.3)
         aw, ah = self.anamorphic_w, self.anamorphic_h
 
@@ -243,9 +276,12 @@ class Renderer:
             self.blur_prog["u_direction"].value = (2.0 / aw, 0.0)
             self._blur_vao.render(moderngl.TRIANGLES)
 
-        # --- Pass 3: Composite to screen ---
+        # Composite
         self.ctx.viewport = (0, 0, self.width, self.height)
-        self.ctx.screen.use()
+        if target_fbo is not None:
+            target_fbo.use()
+        else:
+            self.ctx.screen.use()
         self.ctx.clear(0.0, 0.0, 0.0, 1.0)
 
         self.scene_tex.use(0)
@@ -265,14 +301,81 @@ class Renderer:
 
         self._composite_vao.render(moderngl.TRIANGLES)
 
+    def render(self, segment_buffer: moderngl.Buffer, compute_count: int,
+               ring_segments: np.ndarray | None, settings: dict,
+               delta_time: float = 0.016,
+               particle_buffer: moderngl.Buffer | None = None,
+               particle_count: int = 0):
+        """Render one frame (no trails).
+
+        Args:
+            segment_buffer: SSBO containing compute-generated segments (used as instance VBO)
+            compute_count: Number of segments from compute shader
+            ring_segments: Optional (N, 8) float32 array of ring segments from CPU
+            settings: dict with rendering params
+            delta_time: time since last frame in seconds
+            particle_buffer: Optional SSBO with particle segments
+            particle_count: Number of particle segments
+        """
+        self._render_scene(segment_buffer, compute_count, ring_segments,
+                          particle_buffer, particle_count, settings)
+        self._render_bloom_composite(settings)
+
+    def render_with_trail(self, segment_buffer: moderngl.Buffer, compute_count: int,
+                          ring_segments: np.ndarray | None, settings: dict,
+                          trail_decay: float, delta_time: float = 0.016,
+                          particle_buffer: moderngl.Buffer | None = None,
+                          particle_count: int = 0):
+        """Render one frame with motion trails.
+
+        Composites prev_trail * decay + current_scene into trail FBO,
+        then uses the trail texture as the scene for bloom/composite.
+        """
+        # Render current scene to scene FBO
+        self._render_scene(segment_buffer, compute_count, ring_segments,
+                          particle_buffer, particle_count, settings)
+
+        # Determine ping-pong targets
+        if self._trail_ping == 0:
+            prev_tex = self.trail_texA
+            dst_fbo = self.trail_fboB
+            result_tex = self.trail_texB
+            self._trail_ping = 1
+        else:
+            prev_tex = self.trail_texB
+            dst_fbo = self.trail_fboA
+            result_tex = self.trail_texA
+            self._trail_ping = 0
+
+        # Trail composite: prev * decay + current
+        dst_fbo.use()
+        self.ctx.viewport = (0, 0, self.width, self.height)
+        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+
+        prev_tex.use(0)
+        self.scene_tex.use(1)
+        self.trail_prog["u_prev_trail"].value = 0
+        self.trail_prog["u_current_scene"].value = 1
+        self.trail_prog["u_decay"].value = trail_decay
+        self._trail_vao.render(moderngl.TRIANGLES)
+
+        # Use trail result as the scene texture for bloom/composite
+        # Swap scene_tex temporarily
+        original_scene_tex = self.scene_tex
+        self.scene_tex = result_tex
+        self._render_bloom_composite(settings)
+        self.scene_tex = original_scene_tex
+
     def cleanup(self):
         """Release all GPU resources."""
         objs = [
             self.scene_tex, self.bright_tex, self.scene_fbo,
             self._quad_vbo, self._fsq_vbo, self._ring_buffer,
-            self._blur_vao, self._composite_vao,
+            self._blur_vao, self._composite_vao, self._trail_vao,
             self.anamorphic_texA, self.anamorphic_texB,
             self.anamorphic_fboA, self.anamorphic_fboB,
+            self.trail_texA, self.trail_texB,
+            self.trail_fboA, self.trail_fboB,
         ]
         for texA, texB, fboA, fboB, _, _ in self.bloom_scales:
             objs.extend([texA, texB, fboA, fboB])
