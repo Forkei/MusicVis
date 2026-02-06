@@ -19,9 +19,11 @@ from src.audio.player import AudioPlayer
 from src.audio.cookie_helper import cookies_exist, open_login_browser, export_cookies
 from src.visualization.renderer import Renderer
 from src.visualization.energy_ball import EnergyBallGenerator
+from src.audio.library import SongLibrary
 from src.ui.search_panel import SearchPanel
 from src.ui.player_controls import PlayerControls
 from src.ui.settings_panel import SettingsPanel
+from src.ui.library_panel import LibraryPanel
 
 
 class AppState(Enum):
@@ -59,6 +61,11 @@ class App:
         self.player = AudioPlayer()
         self.analysis: AnalysisResult | None = None
         self.current_song_title = ""
+
+        # Library
+        self.library = SongLibrary()
+        self.library_panel = LibraryPanel()
+        self._current_entry: dict | None = None
 
         # Background task
         self._bg_thread: threading.Thread | None = None
@@ -228,6 +235,11 @@ class App:
     def _update_search(self):
         selected = self.search_panel.draw()
 
+        # Library panel
+        lib_action = self.library_panel.draw(self.library.get_all())
+        if lib_action:
+            self._handle_library_action(lib_action)
+
         # Handle search trigger
         if self.search_panel.searching:
             query = self.search_panel.query
@@ -250,9 +262,71 @@ class App:
         if getattr(self, "_search_in_progress", False):
             self.search_panel.searching = True
 
-        # Handle song selection
+        # Handle song selection — check library cache first
         if selected:
-            self._start_download(selected)
+            video_id = selected.get("video_id", "")
+            existing = self.library.find_by_video_id(video_id) if video_id else None
+            if existing:
+                self._play_from_library(existing)
+            else:
+                self._start_download(selected)
+
+    def _play_from_library(self, entry: dict):
+        """Play a song from the library, using cached analysis if available."""
+        wav = self.library.wav_path(entry)
+        if not os.path.isfile(wav):
+            self.library.delete_song(entry["video_id"])
+            self.search_panel.error_msg = "WAV file missing — entry removed."
+            return
+
+        self._current_entry = entry
+        self.current_song_title = entry.get("title", "Unknown")
+
+        # Try loading cached analysis
+        cached = self.library.load_analysis(entry)
+        if cached is not None:
+            self.analysis = cached
+            self.player.load(wav)
+            self.player.play()
+            self.state = AppState.PLAYING
+        else:
+            self._start_analysis(wav)
+
+    def _handle_library_action(self, action: dict):
+        """Handle play/delete/reanalyze actions from the library panel."""
+        entry = action["entry"]
+        act = action["action"]
+
+        if act == "play":
+            # Stop current playback if any
+            if self.state == AppState.PLAYING:
+                self.player.stop()
+                self.analysis = None
+            self._play_from_library(entry)
+
+        elif act == "delete":
+            # Stop if this song is currently playing
+            if self._current_entry and self._current_entry.get("video_id") == entry["video_id"]:
+                self.player.stop()
+                self.analysis = None
+                self._current_entry = None
+                self.state = AppState.SEARCH
+            self.library.delete_song(entry["video_id"])
+
+        elif act == "reanalyze":
+            # Stop if this song is currently playing
+            if self.state == AppState.PLAYING:
+                self.player.stop()
+                self.analysis = None
+            self.library.delete_analysis(entry["video_id"])
+            self._current_entry = entry
+            self.current_song_title = entry.get("title", "Unknown")
+            wav = self.library.wav_path(entry)
+            if os.path.isfile(wav):
+                self._start_analysis(wav)
+            else:
+                self.library.delete_song(entry["video_id"])
+                self.search_panel.error_msg = "WAV file missing — entry removed."
 
     def _start_download(self, song: dict):
         self.state = AppState.DOWNLOADING
@@ -266,6 +340,8 @@ class App:
         def do_download():
             try:
                 path = yt_download(url, DOWNLOADS_DIR, progress_callback=self._set_progress)
+                wav_filename = os.path.basename(path)
+                self._current_entry = self.library.register_download(song, wav_filename)
                 self._start_analysis(path)
             except Exception as e:
                 msg = str(e)
@@ -287,6 +363,8 @@ class App:
             try:
                 result = audio_analyze(wav_path, progress_callback=self._set_progress)
                 self.analysis = result
+                if self._current_entry:
+                    self.library.save_analysis(self._current_entry, result)
                 self.player.load(wav_path)
                 self.player.play()
                 self.state = AppState.PLAYING
@@ -344,6 +422,11 @@ class App:
 
         # Settings
         self.settings_panel.draw()
+
+        # Library panel (allows switching songs while playing)
+        lib_action = self.library_panel.draw(self.library.get_all())
+        if lib_action:
+            self._handle_library_action(lib_action)
 
         # Back button
         viewport = imgui.get_main_viewport()
