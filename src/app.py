@@ -1,5 +1,6 @@
 """Main application: GLFW window + moderngl + imgui + audio integration."""
 
+import multiprocessing
 import os
 import sys
 import time
@@ -14,9 +15,8 @@ from imgui_bundle.python_backends.glfw_backend import GlfwRenderer as ImGuiGlfwR
 
 from src.audio.search import search as yt_search
 from src.audio.downloader import download as yt_download
-from src.audio.analyzer import analyze as audio_analyze, AnalysisResult
+from src.audio.analyzer import analyze as audio_analyze, analyze_subprocess, AnalysisResult
 from src.audio.player import AudioPlayer
-from src.audio.cookie_helper import cookies_exist, open_login_browser, export_cookies
 from src.visualization.renderer import Renderer
 from src.visualization.energy_ball import EnergyBallGenerator
 from src.audio.library import SongLibrary
@@ -28,7 +28,6 @@ from src.ui.preset_manager import PresetManager
 
 
 class AppState(Enum):
-    SETUP = auto()
     SEARCH = auto()
     DOWNLOADING = auto()
     ANALYZING = auto()
@@ -48,15 +47,7 @@ class App:
         self.status_msg = ""
         self.error_msg = ""
 
-        # Check if cookies exist, if not go to SETUP
-        if cookies_exist():
-            self.state = AppState.SEARCH
-        else:
-            self.state = AppState.SETUP
-
-        # Setup state
-        self._setup_browser_proc = None
-        self._setup_status = ""
+        self.state = AppState.SEARCH
 
         # Audio
         self.player = AudioPlayer()
@@ -120,7 +111,8 @@ class App:
         # Resize callback
         glfw.set_framebuffer_size_callback(self.window, self._on_resize)
 
-        # Key callback for fullscreen toggle
+        # Key callback for fullscreen toggle (chain with imgui's handler)
+        self._imgui_key_callback = self.imgui_impl.keyboard_callback
         glfw.set_key_callback(self.window, self._on_key)
 
         # Fullscreen state
@@ -145,6 +137,10 @@ class App:
             self.renderer.resize(width, height)
 
     def _on_key(self, window, key, scancode, action, mods):
+        # Forward to imgui so text input, Ctrl+V paste, etc. still work
+        if self._imgui_key_callback:
+            self._imgui_key_callback(window, key, scancode, action, mods)
+
         if action != glfw.PRESS:
             return
         if key == glfw.KEY_F11 or (key == glfw.KEY_F and mods == 0):
@@ -192,9 +188,7 @@ class App:
 
     def _update(self):
         """Update logic per frame."""
-        if self.state == AppState.SETUP:
-            self._update_setup()
-        elif self.state == AppState.SEARCH:
+        if self.state == AppState.SEARCH:
             self._update_search()
         elif self.state == AppState.DOWNLOADING:
             self._update_downloading()
@@ -202,76 +196,6 @@ class App:
             self._update_analyzing()
         elif self.state == AppState.PLAYING:
             self._update_playing()
-
-    def _update_setup(self):
-        """Cookie setup flow: opens Chrome for YouTube sign-in."""
-        viewport = imgui.get_main_viewport()
-        vp_size = viewport.size
-        win_w, win_h = 500, 200
-
-        imgui.set_next_window_pos(
-            ((vp_size.x - win_w) / 2, (vp_size.y - win_h) / 2),
-            imgui.Cond_.always,
-        )
-        imgui.set_next_window_size((win_w, win_h), imgui.Cond_.always)
-
-        expanded, _ = imgui.begin("YouTube Setup", None, imgui.WindowFlags_.no_collapse)
-        if expanded:
-            imgui.text_wrapped(
-                "YouTube requires authentication to download audio. "
-                "Click the button below to open a browser window. "
-                "Sign into your Google account, then come back and click 'Done'."
-            )
-            imgui.spacing()
-
-            if self._setup_browser_proc is None:
-                if imgui.button("Open Browser to Sign In", (250, 30)):
-                    self._setup_browser_proc = open_login_browser()
-                    if self._setup_browser_proc is None:
-                        self._setup_status = "Chrome not found. Please install Google Chrome."
-                    else:
-                        self._setup_status = "Browser opened. Sign into Google, then click 'Done' below."
-            else:
-                imgui.text(self._setup_status)
-                imgui.spacing()
-
-                if imgui.button("Done - I've Signed In", (250, 30)):
-                    self._setup_status = "Extracting cookies..."
-                    logged_in = export_cookies(self._setup_browser_proc)
-                    if logged_in:
-                        self._setup_status = "Success! Cookies saved."
-                        # Kill browser
-                        try:
-                            self._setup_browser_proc.terminate()
-                        except Exception:
-                            pass
-                        self._setup_browser_proc = None
-                        self.state = AppState.SEARCH
-                    elif cookies_exist():
-                        self._setup_status = "Cookies saved (not logged in - may not work for all videos)."
-                        try:
-                            self._setup_browser_proc.terminate()
-                        except Exception:
-                            pass
-                        self._setup_browser_proc = None
-                        self.state = AppState.SEARCH
-                    else:
-                        self._setup_status = "No cookies found. Please sign into YouTube in the browser first."
-
-                imgui.same_line()
-                if imgui.button("Skip", (80, 30)):
-                    if self._setup_browser_proc:
-                        try:
-                            self._setup_browser_proc.terminate()
-                        except Exception:
-                            pass
-                    self._setup_browser_proc = None
-                    self.state = AppState.SEARCH
-
-            if self._setup_status and "Success" not in self._setup_status:
-                imgui.text_colored((1.0, 0.8, 0.3, 1.0), self._setup_status)
-
-        imgui.end()
 
     def _update_search(self):
         selected = self.search_panel.draw()
@@ -399,22 +323,17 @@ class App:
         self.state = AppState.ANALYZING
         self.progress = 0.0
         self.status_msg = f"Analyzing: {self.current_song_title}"
+        self._analysis_wav_path = wav_path
 
-        def do_analyze():
-            try:
-                result = audio_analyze(wav_path, progress_callback=self._set_progress)
-                self.analysis = result
-                if self._current_entry:
-                    self.library.save_analysis(self._current_entry, result)
-                self.player.load(wav_path)
-                self.player.play()
-                self.state = AppState.PLAYING
-            except Exception as e:
-                self.search_panel.error_msg = f"Analysis failed: {str(e)[:120]}"
-                self.state = AppState.SEARCH
-
-        self._bg_thread = threading.Thread(target=do_analyze, daemon=True)
-        self._bg_thread.start()
+        # Run analysis in a separate process to avoid GIL blocking the UI
+        self._analysis_progress = multiprocessing.Value('d', 0.0)
+        self._analysis_queue = multiprocessing.Queue()
+        self._analysis_process = multiprocessing.Process(
+            target=analyze_subprocess,
+            args=(wav_path, self._analysis_progress, self._analysis_queue),
+            daemon=True,
+        )
+        self._analysis_process.start()
 
     def _set_progress(self, p: float):
         self.progress = max(0.0, min(1.0, p))
@@ -423,6 +342,29 @@ class App:
         self._draw_progress_overlay()
 
     def _update_analyzing(self):
+        # Poll progress from the subprocess
+        if hasattr(self, '_analysis_progress'):
+            self.progress = self._analysis_progress.value
+
+        # Check if result is ready (non-blocking)
+        if hasattr(self, '_analysis_queue'):
+            import queue
+            try:
+                status, payload = self._analysis_queue.get_nowait()
+            except queue.Empty:
+                pass  # still running
+            else:
+                if status == "ok":
+                    self.analysis = payload
+                    if self._current_entry:
+                        self.library.save_analysis(self._current_entry, payload)
+                    self.player.load(self._analysis_wav_path)
+                    self.player.play()
+                    self.state = AppState.PLAYING
+                else:
+                    self.search_panel.error_msg = f"Analysis failed: {payload}"
+                    self.state = AppState.SEARCH
+
         self._draw_progress_overlay()
 
     def _draw_progress_overlay(self):

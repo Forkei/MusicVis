@@ -1,6 +1,53 @@
 """Search panel UI with imgui."""
 
+import os
+import platform
+import re
+import threading
+
 from imgui_bundle import imgui
+
+
+def _ensure_deno_path():
+    """Ensure deno is on PATH for yt-dlp JS runtime."""
+    if platform.system() == "Windows":
+        deno_dir = os.path.expandvars(r"%USERPROFILE%\.deno\bin")
+        sep = ";"
+    else:
+        deno_dir = os.path.expanduser("~/.deno/bin")
+        sep = ":"
+    if os.path.isdir(deno_dir) and deno_dir not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = os.environ.get("PATH", "") + sep + deno_dir
+
+
+_YT_URL_RE = re.compile(
+    r'(?:https?://)?(?:www\.|m\.|music\.)?(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/shorts/)([A-Za-z0-9_-]{11})'
+)
+
+
+def _extract_video_id(text: str) -> str | None:
+    """Return the 11-char video ID if text looks like a YouTube URL, else None."""
+    m = _YT_URL_RE.search(text.strip())
+    return m.group(1) if m else None
+
+
+def _fetch_title(video_id: str, callback):
+    """Fetch the video title in a background thread using yt-dlp."""
+    _ensure_deno_path()
+    try:
+        import yt_dlp
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "extract_flat": True,
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+            title = info.get("title", "YouTube Video")
+            callback(video_id, title)
+    except Exception:
+        pass  # keep the placeholder title
 
 
 class SearchPanel:
@@ -12,6 +59,7 @@ class SearchPanel:
         self.selected_index: int = -1
         self.searching = False
         self.error_msg = ""
+        self._pending_url_result: dict | None = None
 
     def draw(self) -> dict | None:
         """Draw the search panel. Returns selected result dict or None."""
@@ -32,8 +80,29 @@ class SearchPanel:
             imgui.same_line()
             if imgui.button("Search") or trigger_search:
                 if self.query.strip():
-                    self.searching = True
-                    self.error_msg = ""
+                    video_id = _extract_video_id(self.query)
+                    if video_id:
+                        # Direct URL submission — build a result dict immediately
+                        url = self.query.strip()
+                        result = {
+                            "url": url,
+                            "video_id": video_id,
+                            "title": "YouTube Video",
+                            "channel": "",
+                            "duration_str": "",
+                        }
+                        self._pending_url_result = result
+                        # Fetch real title in the background
+                        def _on_title(vid, title):
+                            if self._pending_url_result and self._pending_url_result.get("video_id") == vid:
+                                self._pending_url_result["title"] = title
+                        threading.Thread(
+                            target=_fetch_title, args=(video_id, _on_title), daemon=True
+                        ).start()
+                        selected = result
+                    else:
+                        self.searching = True
+                        self.error_msg = ""
 
             if self.searching:
                 imgui.text("Searching...")
@@ -42,6 +111,10 @@ class SearchPanel:
                 imgui.text_colored((1.0, 0.3, 0.3, 1.0), self.error_msg)
 
             imgui.separator()
+
+            # Hint text
+            imgui.text_disabled("Search or paste a YouTube URL")
+            imgui.spacing()
 
             # Results list
             if self.results:
@@ -64,7 +137,7 @@ class SearchPanel:
                     if channel:
                         imgui.text_disabled(f"  {channel}")
             elif not self.searching:
-                imgui.text_disabled("Search for a song to get started")
+                pass  # hint text already shown above
 
         imgui.end()
         return selected

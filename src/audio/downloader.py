@@ -2,6 +2,7 @@
 
 import glob
 import os
+import platform
 import re
 import yt_dlp
 
@@ -27,9 +28,14 @@ def download(url: str, output_dir: str, progress_callback=None) -> str:
     os.makedirs(output_dir, exist_ok=True)
 
     # Add deno to PATH for yt-dlp JS runtime
-    deno_dir = os.path.expandvars(r"%USERPROFILE%\.deno\bin")
-    if os.path.isdir(deno_dir) and deno_dir not in os.environ["PATH"]:
-        os.environ["PATH"] = os.environ["PATH"] + ";" + deno_dir
+    if platform.system() == "Windows":
+        deno_dir = os.path.expandvars(r"%USERPROFILE%\.deno\bin")
+        if os.path.isdir(deno_dir) and deno_dir not in os.environ["PATH"]:
+            os.environ["PATH"] = os.environ["PATH"] + ";" + deno_dir
+    else:
+        deno_dir = os.path.expanduser("~/.deno/bin")
+        if os.path.isdir(deno_dir) and deno_dir not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = os.environ.get("PATH", "") + ":" + deno_dir
 
     def hook(d):
         if progress_callback and d["status"] == "downloading":
