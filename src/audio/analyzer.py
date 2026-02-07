@@ -735,27 +735,19 @@ def _detect_climaxes_general(
     # Smooth
     climax_score = uniform_filter1d(climax_score, max(3, int(0.5 * fps)))
 
-    # Determine climax type based on section context
+    # Determine climax type based on section context (vectorized)
     climax_type = np.zeros(n_frames, dtype=np.int8)
-    threshold = 0.3
+    active = climax_score >= 0.3
 
-    for i in range(n_frames):
-        if climax_score[i] < threshold:
-            continue
-        st = section_type[i]
-        if st == 6:  # drop
-            climax_type[i] = 1
-        elif st == 2:  # chorus
-            climax_type[i] = 2
-        elif st == 5:  # buildup
-            climax_type[i] = 3  # crescendo
-        elif st == 8:  # solo
-            climax_type[i] = 4
-        elif st == 4:  # breakdown — if score is high it's a return
-            climax_type[i] = 5
-        else:
-            # Generic climax
-            climax_type[i] = 2 if climax_score[i] > 0.6 else 0
+    # Map section_type to climax_type where climax is active
+    section_to_climax = {6: 1, 2: 2, 5: 3, 8: 4, 4: 5}
+    for st_val, ct_val in section_to_climax.items():
+        mask = active & (section_type == st_val)
+        climax_type[mask] = ct_val
+
+    # Default: generic climax for active frames not yet assigned
+    unassigned = active & (climax_type == 0)
+    climax_type[unassigned & (climax_score > 0.6)] = 2
 
     return climax_score, climax_type
 
@@ -793,19 +785,29 @@ def _compute_valence_arousal(
     major = major / np.linalg.norm(major)
     minor = minor / np.linalg.norm(minor)
 
-    valence = np.zeros(n_frames, dtype=np.float64)
-    for f in range(n_frames):
-        c = chroma[:, f].astype(np.float64)
-        cn = np.linalg.norm(c)
-        if cn < 1e-8:
-            valence[f] = 0.5
-            continue
-        c = c / cn
-        # Best correlation across all rotations (key detection)
-        best_major = max(np.dot(np.roll(major, k), c) for k in range(12))
-        best_minor = max(np.dot(np.roll(minor, k), c) for k in range(12))
-        # Major = bright/positive, minor = dark
-        valence[f] = 0.5 + (best_major - best_minor) * 0.5
+    # Pre-compute all 12 rotations as (12, 12) matrices for vectorized correlation
+    major_rots = np.array([np.roll(major, k) for k in range(12)])  # (12, 12)
+    minor_rots = np.array([np.roll(minor, k) for k in range(12)])  # (12, 12)
+
+    # Normalize chroma per frame: (12, n_frames)
+    chroma_f = chroma.astype(np.float64)
+    norms = np.linalg.norm(chroma_f, axis=0, keepdims=True)  # (1, n_frames)
+    norms = np.maximum(norms, 1e-8)
+    chroma_normed = chroma_f / norms  # (12, n_frames)
+
+    # Correlation with all rotations: (12, n_frames) via matrix multiply
+    major_corr = major_rots @ chroma_normed  # (12, n_frames)
+    minor_corr = minor_rots @ chroma_normed  # (12, n_frames)
+
+    # Best correlation across keys
+    best_major = np.max(major_corr, axis=0)  # (n_frames,)
+    best_minor = np.max(minor_corr, axis=0)  # (n_frames,)
+
+    valence = 0.5 + (best_major - best_minor) * 0.5
+
+    # Zero-energy frames get neutral valence
+    silent = norms.flatten() < 1e-7
+    valence[silent] = 0.5
 
     # Add spectral warmth component
     cent_norm = centroid_raw / (centroid_raw.max() + 1e-8)
@@ -869,31 +871,28 @@ def _compute_lookahead(
         if b <= 0 or b >= n_frames:
             continue
         start = max(0, b - ramp_len)
-        for f in range(start, b):
-            t = (f - start) / ramp_len
-            section_change[f] = max(section_change[f], t)
+        ramp = np.linspace(0, (b - start) / ramp_len, b - start, endpoint=False)
+        section_change[start:b] = np.maximum(section_change[start:b], ramp)
 
     # Climax proximity: 4s ramp before each climax peak (score > 0.5)
     climax_prox = np.zeros(n_frames, dtype=np.float64)
     ramp_len_c = max(1, int(4.0 * fps))
-    # Find climax peaks
-    threshold = 0.5
-    in_peak = False
+
+    # Find climax peak regions using diff on threshold crossings
+    above = (climax_score > 0.5).astype(np.int8)
+    crossings = np.diff(above, prepend=0)
+    starts = np.where(crossings == 1)[0]
+    ends = np.where(crossings == -1)[0]
+    if len(ends) < len(starts):
+        ends = np.append(ends, n_frames)
     peak_frames = []
-    for i in range(n_frames):
-        if climax_score[i] > threshold and not in_peak:
-            in_peak = True
-            peak_start = i
-        elif climax_score[i] <= threshold and in_peak:
-            in_peak = False
-            # Peak is at the max within this region
-            peak_frames.append(peak_start + int(np.argmax(climax_score[peak_start:i])))
+    for s, e in zip(starts, ends):
+        peak_frames.append(s + int(np.argmax(climax_score[s:e])))
 
     for pf in peak_frames:
         start = max(0, pf - ramp_len_c)
-        for f in range(start, pf):
-            t = (f - start) / ramp_len_c
-            climax_prox[f] = max(climax_prox[f], t)
+        ramp = np.linspace(0, (pf - start) / ramp_len_c, pf - start, endpoint=False)
+        climax_prox[start:pf] = np.maximum(climax_prox[start:pf], ramp)
 
     return (
         energy_delta.astype(np.float32),
