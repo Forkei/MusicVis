@@ -72,13 +72,20 @@ void main() {
     float x1 = x + vx * u_dt;
     float y1 = y + vy * u_dt;
 
+    // Dynamic thickness: scales with life and velocity for richer look
+    float speed = length(vec2(vx, vy));
+    float dyn_thickness = 2.0 + life_ratio * 2.0 + min(speed * 0.005, 2.0);
+
+    // Depth based on distance from screen center (gives bloom variation)
+    float particle_depth = 0.3 + life_ratio * 0.4;
+
     // Write output segment
     segments[seg_base + 0] = x;
     segments[seg_base + 1] = y;
     segments[seg_base + 2] = x1;
     segments[seg_base + 3] = y1;
-    segments[seg_base + 4] = 2.5;           // thickness
+    segments[seg_base + 4] = dyn_thickness;
     segments[seg_base + 5] = final_bright;
     segments[seg_base + 6] = hue;
-    segments[seg_base + 7] = 0.3;           // depth
+    segments[seg_base + 7] = particle_depth;
 }

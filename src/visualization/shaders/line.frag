@@ -41,15 +41,19 @@ void main() {
 
     // Hue-based coloring: global centroid hue + per-instance offset
     float hue = fract(u_global_hue + v_hue);
-    vec3 base_color = hsv2rgb(hue, 0.8, 1.0);
 
-    // Blend with white for the core (hot center of each line)
-    vec3 line_color = mix(base_color, vec3(1.0), core * 0.35);
+    // Saturation: foreground lines more saturated, flash boosts saturation
+    float sat = 0.85 + v_depth * 0.1 + u_flash * 0.05;
+    vec3 base_color = hsv2rgb(hue, clamp(sat, 0.7, 1.0), 1.0);
+
+    // Blend toward bright version of the same hue for the core (preserves color)
+    vec3 hot_color = hsv2rgb(hue, 0.55, 1.0);
+    vec3 line_color = mix(base_color, hot_color, core * 0.4);
     vec3 color = line_color * glow * v_brightness;
 
-    // Depth fog: far segments (low depth) fade toward fog color
+    // Depth fog: far segments (low depth) add subtle ambient glow
     float fog = pow(1.0 - v_depth, 2.0) * u_depth_fog;
-    color = mix(color, u_fog_color * 0.3, fog);
+    color = mix(color, u_fog_color * 0.5, fog);
 
     // Apply flash
     color *= 1.0 + u_flash * 2.0;
@@ -58,8 +62,8 @@ void main() {
     float alpha = glow * v_brightness;
     frag_color = vec4(color, alpha);
 
-    // Bright pass for bloom (lower threshold for more glow)
+    // Bright pass for bloom: only bloom the truly bright parts
     float lum = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    float bright = max(0.0, lum - 0.3) / (lum + 0.001);
+    float bright = smoothstep(0.5, 1.5, lum);
     bright_color = vec4(color * bright, 1.0);
 }

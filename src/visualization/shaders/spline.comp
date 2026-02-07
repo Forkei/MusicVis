@@ -93,14 +93,14 @@ void main() {
     float hue_offset = loop_data[vp_base + 2];
     float band_index = loop_data[vp_base + 3];
 
-    // Band-specific energy response
+    // Band-specific energy response (wider range for more dynamic visuals)
     float band_energy;
     if (band_index < 0.5) {
-        band_energy = u_bass * 1.5;
+        band_energy = u_bass * 2.0;
     } else if (band_index > 1.5) {
-        band_energy = u_treble * 1.8;
+        band_energy = u_treble * 2.5;
     } else {
-        band_energy = u_mid;
+        band_energy = u_mid * 1.5;
     }
 
     // Global rotation
@@ -187,8 +187,8 @@ void main() {
     float thickness_mod = 0.4 + depth_norm * 0.6;
     float brightness_mod = 0.3 + depth_norm * 0.7;
 
-    float thickness = base_thickness * (1.0 + u_kick * 0.3) * thickness_mod;
-    float brightness = base_brightness * (0.5 + band_energy * 0.3 + u_rms * 0.2) * (1.0 + u_snare * 1.5) * brightness_mod;
+    float thickness = base_thickness * (1.0 + u_kick * 0.8) * thickness_mod;
+    float brightness = base_brightness * (0.3 + band_energy * 0.4 + u_rms * 0.3) * (1.0 + u_snare * 2.0) * brightness_mod;
 
     // Dynamic loop dimming
     if (loop_idx >= u_active_loops) {
@@ -205,6 +205,9 @@ void main() {
     segment_data[out_base + 3] = sy1;
     segment_data[out_base + 4] = thickness;
     segment_data[out_base + 5] = brightness;
-    segment_data[out_base + 6] = hue_offset;
+    // Per-segment hue variation: shift by depth and position along loop
+    float seg_progress = float(local_id) / 240.0;
+    float hue_variation = depth_norm * 0.08 + seg_progress * 0.05;
+    segment_data[out_base + 6] = hue_offset + hue_variation;
     segment_data[out_base + 7] = depth_norm;
 }
