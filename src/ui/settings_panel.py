@@ -4,10 +4,10 @@ from imgui_bundle import imgui
 
 
 DEFAULT_SETTINGS = {
-    "bloom_tint": (0.3, 0.6, 1.0),
-    "brightness": 2.6,
+    "bloom_tint": (0.5, 0.7, 1.0),
+    "brightness": 1.8,
     "energy_mult": 3.0,
-    "bloom_intensity": 5.0,
+    "bloom_intensity": 2.5,
     "loop_count": 15,
     "noise_mult": 0.3,
     "rotation_speed": 2.18,
@@ -307,7 +307,7 @@ class SettingsPanel:
 
         if imgui.begin_popup_modal("Save Preset")[0]:
             changed, self._save_name_buf = imgui.input_text(
-                "Name", self._save_name_buf, 256
+                "Name", self._save_name_buf
             )
             if imgui.button("Save", (120, 0)):
                 if self._save_name_buf.strip():

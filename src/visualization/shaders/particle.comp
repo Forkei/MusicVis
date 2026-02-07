@@ -17,6 +17,8 @@ uniform float u_drag;
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
+    if (idx >= 2048) return;  // bounds check: dispatch may exceed particle count
+
     uint base = idx * 8;
     uint seg_base = idx * 8;
 
@@ -46,9 +48,10 @@ void main() {
     x += vx * u_dt;
     y += vy * u_dt;
 
-    // Apply drag
-    vx *= (1.0 - u_drag * u_dt);
-    vy *= (1.0 - u_drag * u_dt);
+    // Apply drag (clamped to prevent velocity reversal at large dt)
+    float drag_factor = max(0.0, 1.0 - u_drag * u_dt);
+    vx *= drag_factor;
+    vy *= drag_factor;
 
     // Decrement life
     life -= u_dt;
@@ -65,16 +68,16 @@ void main() {
     float fade = life_ratio * life_ratio; // quadratic fade
     float final_bright = bright * fade;
 
-    // Motion-blur line: current pos to pos + velocity * 16ms
-    float x1 = x + vx * 0.016;
-    float y1 = y + vy * 0.016;
+    // Motion-blur line: current pos to pos + velocity * dt
+    float x1 = x + vx * u_dt;
+    float y1 = y + vy * u_dt;
 
     // Write output segment
     segments[seg_base + 0] = x;
     segments[seg_base + 1] = y;
     segments[seg_base + 2] = x1;
     segments[seg_base + 3] = y1;
-    segments[seg_base + 4] = 1.5;           // thickness
+    segments[seg_base + 4] = 2.5;           // thickness
     segments[seg_base + 5] = final_bright;
     segments[seg_base + 6] = hue;
     segments[seg_base + 7] = 0.3;           // depth

@@ -44,7 +44,7 @@ void main() {
     vec3 base_color = hsv2rgb(hue, 0.8, 1.0);
 
     // Blend with white for the core (hot center of each line)
-    vec3 line_color = mix(base_color, vec3(1.0), core * 0.7);
+    vec3 line_color = mix(base_color, vec3(1.0), core * 0.35);
     vec3 color = line_color * glow * v_brightness;
 
     // Depth fog: far segments (low depth) fade toward fog color

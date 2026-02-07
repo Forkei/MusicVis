@@ -290,17 +290,36 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     kick_pulse = np.zeros(n_frames)
     snare_pulse = np.zeros(n_frames)
 
-    for bf in beat_frames:
+    # Supplement beat_frames with strong onset peaks to catch beats the tracker misses
+    onset_frames = librosa.onset.onset_detect(
+        y=y_percussive, sr=sr, hop_length=hop_length, backtrack=False,
+        units='frames'
+    )
+    # Merge: add onset peaks that aren't near existing beat frames
+    existing_set = set(beat_frames.tolist())
+    margin = max(2, int(fps * 0.06))  # ~60ms dedup margin
+    supplementary = []
+    for of in onset_frames:
+        if of >= n_frames:
+            continue
+        near_existing = any(abs(of - bf) <= margin for bf in beat_frames if bf < n_frames)
+        if not near_existing:
+            supplementary.append(of)
+    all_beat_frames = np.concatenate([beat_frames, np.array(supplementary, dtype=int)])
+
+    for bf in all_beat_frames:
         if bf >= n_frames:
             continue
+        # Full weight for beat_track beats, 0.7 for supplementary onset peaks
+        weight = 1.0 if bf in existing_set else 0.7
         if bass_flux[bf] >= mid_flux[bf]:
             for i in range(max(0, bf - pulse_width), min(n_frames, bf + pulse_width + 1)):
                 dist = abs(i - bf) / max(1, pulse_width)
-                kick_pulse[i] = max(kick_pulse[i], 1.0 - dist)
+                kick_pulse[i] = max(kick_pulse[i], (1.0 - dist) * weight)
         else:
             for i in range(max(0, bf - pulse_width), min(n_frames, bf + pulse_width + 1)):
                 dist = abs(i - bf) / max(1, pulse_width)
-                snare_pulse[i] = max(snare_pulse[i], 1.0 - dist)
+                snare_pulse[i] = max(snare_pulse[i], (1.0 - dist) * weight)
 
     # Hihat: continuous treble transient envelope
     hihat_pulse = _local_normalize(treble_flux, window_s, fps)
@@ -308,10 +327,10 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
 
     report(0.40)
 
-    # --- Spectral centroid (from harmonic component) ---
+    # --- Spectral centroid (from harmonic component, locally normalized) ---
     cent = librosa.feature.spectral_centroid(y=y_harmonic, sr=sr, hop_length=hop_length)[0]
     cent = _fit_length(cent, n_frames)
-    spectral_centroid = _normalize(cent)
+    spectral_centroid = _local_normalize(cent, window_s, fps)
 
     report(0.43)
 
@@ -388,7 +407,7 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
         mean_interval = np.mean(np.diff(beat_times))
         expected = beat_times[0] + mean_interval * np.arange(len(beat_times))
         groove_factor = float(np.clip(
-            np.sqrt(np.mean((beat_times - expected[:len(beat_times)])**2)) / 0.05, 0, 1
+            np.sqrt(np.mean((beat_times - expected[:len(beat_times)])**2)) / 0.15, 0, 1
         ))
     else:
         groove_factor = 0.0
@@ -629,6 +648,15 @@ def _label_sections(
     section_type = np.zeros(n_frames, dtype=np.int32)
     n_sections = len(boundaries)
 
+    # Song-relative thresholds for better discrimination
+    rms_p25 = float(np.percentile(rms, 25))
+    rms_p50 = float(np.percentile(rms, 50))
+    rms_p75 = float(np.percentile(rms, 75))
+    bass_p50 = float(np.percentile(bass, 50))
+    bass_p75 = float(np.percentile(bass, 75))
+    onset_p50 = float(np.percentile(onset, 50))
+    cent_p75 = float(np.percentile(centroid, 75))
+
     for sec_idx in range(n_sections):
         start = boundaries[sec_idx]
         end = boundaries[sec_idx + 1] if sec_idx + 1 < n_sections else n_frames
@@ -649,29 +677,34 @@ def _label_sections(
         else:
             energy_rising = 0.0
 
-        # Rule-based labeling
+        # Rule-based labeling using song-relative thresholds
         stype = 1  # default = verse
 
-        if sec_idx == 0 and seg_pos < 0.15 and seg_rms < 0.4:
+        if sec_idx == 0 and seg_pos < 0.15 and seg_rms < rms_p50:
             stype = 0  # intro
-        elif sec_idx == n_sections - 1 and seg_pos > 0.85 and seg_rms < 0.4:
+        elif sec_idx == n_sections - 1 and seg_pos > 0.85 and seg_rms < rms_p50:
             stype = 7  # outro
-        elif genre_id == 0 and seg_bass > 0.6 and seg_rms > 0.6:
-            stype = 6  # drop (EDM)
-        elif seg_rms < 0.25 and seg_onset < 0.25:
-            stype = 4  # breakdown
-        elif energy_rising > 0.15 and seg_onset > 0.4:
-            stype = 5  # buildup
-        elif seg_rms > 0.55 and (seg_vocal > 0.5 or seg_cent > 0.5):
-            stype = 2  # chorus
-        elif seg_cent > 0.6 and seg_vocal < 0.3:
-            stype = 8  # solo
-        elif seg_rms < 0.45 and seg_onset < 0.35:
-            # Check if this cluster ID appears rarely (bridge)
+        elif seg_bass > bass_p75 and seg_rms > rms_p75:
+            stype = 6  # drop (any genre with high bass + high energy)
+        elif seg_rms < rms_p25 and seg_onset < onset_p50 * 0.5:
+            stype = 4  # breakdown (quiet + sparse)
+        elif energy_rising > 0.10 and seg_onset > onset_p50:
+            stype = 5  # buildup (energy rising + active onsets)
+        elif seg_rms > rms_p75 and seg_vocal > 0.5:
+            stype = 2  # chorus (loud + vocal)
+        elif seg_rms > rms_p75 and seg_cent > cent_p75:
+            stype = 2  # chorus (loud + bright, instrumental)
+        elif seg_cent > cent_p75 and seg_vocal < 0.3 and seg_onset > onset_p50:
+            stype = 8  # solo (bright + non-vocal + active)
+        elif seg_rms < rms_p50 and seg_rms > rms_p25:
+            # Moderate energy — verse or bridge
             cluster_id = section_labels[start]
             cluster_count = np.sum(section_labels == cluster_id)
             if cluster_count < n_frames * 0.15:
-                stype = 3  # bridge
+                stype = 3  # bridge (rare cluster)
+            else:
+                stype = 1  # verse
+        # else: default verse
 
         section_type[start:end] = stype
 
@@ -786,6 +819,10 @@ def _compute_valence_arousal(
     Valence: correlation with major/minor templates + spectral warmth.
     Arousal: composite of tempo, rms, spectral flux.
     """
+    # Tempo-synced smoothing window
+    beat_dur = 60.0 / max(tempo, 30.0)
+    window_s = 8.0 * beat_dur
+
     # Major and minor templates (pitch class profiles)
     major = np.array([1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1], dtype=np.float64)
     minor = np.array([1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0], dtype=np.float64)
@@ -806,31 +843,38 @@ def _compute_valence_arousal(
     major_corr = major_rots @ chroma_normed  # (12, n_frames)
     minor_corr = minor_rots @ chroma_normed  # (12, n_frames)
 
-    # Best correlation across keys
-    best_major = np.max(major_corr, axis=0)  # (n_frames,)
-    best_minor = np.max(minor_corr, axis=0)  # (n_frames,)
+    # For each frame, find the best key and compare major vs minor at that key
+    # (taking max over all keys independently makes both high and constant)
+    total_corr = major_corr + minor_corr  # (12, n_frames)
+    best_key = np.argmax(total_corr, axis=0)  # (n_frames,)
+    frame_idx = np.arange(n_frames)
+    this_major = major_corr[best_key, frame_idx]
+    this_minor = minor_corr[best_key, frame_idx]
 
-    valence = 0.5 + (best_major - best_minor) * 0.5
+    # Difference is small, so locally normalize to extract per-frame variation
+    diff = this_major - this_minor
+    valence_chroma = _local_normalize(diff, window_s, fps)  # 0-1
 
     # Zero-energy frames get neutral valence
     silent = norms.flatten() < 1e-7
-    valence[silent] = 0.5
+    valence_chroma[silent] = 0.5
 
-    # Add spectral warmth component
+    # Add spectral warmth component (locally normalized centroid)
     cent_norm = centroid_raw / (centroid_raw.max() + 1e-8)
     cent_norm = _fit_length(cent_norm, n_frames)
-    valence = valence * 0.7 + cent_norm * 0.3
+    cent_local = _local_normalize(cent_norm, window_s, fps)
+    valence = valence_chroma * 0.6 + cent_local * 0.4
     valence = np.clip(valence, 0.0, 1.0)
 
     # Smooth
     smooth_w = max(3, int(2.0 * fps))
     valence = uniform_filter1d(valence, smooth_w)
 
-    # Arousal: tempo + rms + flux composite
+    # Arousal: rms + flux (minimize constant tempo weight for more variation)
     tempo_component = np.clip((tempo - 60) / 120.0, 0.0, 1.0)
     rms_component = _fit_length(rms, n_frames)
     flux_component = _fit_length(flux, n_frames)
-    arousal = tempo_component * 0.2 + rms_component * 0.5 + flux_component * 0.3
+    arousal = tempo_component * 0.05 + rms_component * 0.55 + flux_component * 0.40
     arousal = np.clip(arousal, 0.0, 1.0)
     arousal = uniform_filter1d(arousal, smooth_w)
 

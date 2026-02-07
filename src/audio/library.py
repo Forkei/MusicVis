@@ -15,7 +15,7 @@ DOWNLOADS_DIR = os.path.join(
 )
 LIBRARY_JSON = os.path.join(DOWNLOADS_DIR, "library.json")
 
-ANALYSIS_VERSION = 3
+ANALYSIS_VERSION = 4
 
 
 class SongLibrary:

@@ -119,17 +119,16 @@ class ParticleSystem:
         self._state_ssbo.bind_to_storage_buffer(0)
         self._segment_ssbo.bind_to_storage_buffer(1)
 
-        self._compute["u_dt"] = delta_time
+        self._compute["u_dt"] = min(delta_time, 0.05)
         self._compute["u_drag"] = 2.0
 
         n_groups = (MAX_PARTICLES + 255) // 256
         self._compute.run(group_x=n_groups)
         self.ctx.memory_barrier()
 
-        # Read back life values to track on CPU (only needed for spawn slot tracking)
-        # We read the full state back periodically to keep CPU state in sync
-        data = self._state_ssbo.read()
-        self._state_data = np.frombuffer(data, dtype=np.float32).copy()
+        # Update CPU-side life tracking (no GPU readback needed —
+        # decrement life on CPU to keep spawn slot tracking in sync)
+        self._state_data[4::8] -= delta_time  # life field at offset 4 per particle
 
     def cleanup(self):
         """Release GPU resources."""
