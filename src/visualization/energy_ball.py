@@ -211,14 +211,15 @@ class EnergyBallGenerator:
         dt = min(delta_time, 0.05)
 
         # --- A. Spring-damped radius ---
-        quiet_radius = half_min * 0.04
-        loud_radius = half_min * 0.22
+        zoom = settings.get("zoom", 1.0)
+        quiet_radius = half_min * 0.04 * zoom
+        loud_radius = half_min * 0.22 * zoom
 
         target = quiet_radius + (loud_radius - quiet_radius) * (bass ** 0.7) * energy_mult
         target *= (1.0 - anticipation * 0.25)
         target *= (1.0 + explosion * 1.5)
 
-        max_radius = width / 6.0
+        max_radius = width / 6.0 * zoom
         target = min(target, max_radius)
 
         smoothing = 1.0 - math.exp(-8.0 * dt)

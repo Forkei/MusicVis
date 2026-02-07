@@ -5,6 +5,14 @@ Real-time music visualizer that renders an electric energy ball reacting to audi
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
 ![OpenGL 3.3](https://img.shields.io/badge/OpenGL-3.3-green)
 
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=UB6VbAJCecY">
+    <img src="assets/demo.gif" alt="MusicVis Demo" width="480">
+  </a>
+  <br>
+  <a href="https://www.youtube.com/watch?v=UB6VbAJCecY">Click to watch the full demo with audio on YouTube</a>
+</p>
+
 ## How It Works
 
 1. **Search** for a song on YouTube directly from the app
@@ -29,18 +37,41 @@ All rendering is additive-blended with instanced line drawing (up to 50k segment
 
 - Python 3.12+
 - GPU with OpenGL 3.3 support
-- Google Chrome (for one-time YouTube cookie setup)
 
 ## Setup
 
 ```bash
-git clone https://github.com/Forkei/MusicVis.git
+git clone https://github.com/RomanSlack/MusicVis.git
 cd MusicVis
 pip install -r requirements.txt
 python main.py
 ```
 
-On first launch, the app will ask you to sign into YouTube through a Chrome window. This is a one-time step — cookies are saved locally so yt-dlp can download audio. You can skip this, but some videos may fail to download without authentication.
+### Linux
+
+Install system dependencies for audio and OpenGL:
+
+```bash
+# Ubuntu/Debian
+sudo apt install libasound2-dev portaudio19-dev libgl1-mesa-dev libglu1-mesa-dev
+
+# Fedora
+sudo dnf install alsa-lib-devel portaudio-devel mesa-libGL-devel mesa-libGLU-devel
+```
+
+If you're using conda and audio devices aren't showing up, the app automatically sets `ALSA_PLUGIN_DIR` to find PipeWire/PulseAudio virtual devices. If you still have issues, make sure PipeWire or PulseAudio is running.
+
+### Windows
+
+No extra system dependencies needed — just `pip install -r requirements.txt` and go.
+
+### macOS
+
+```bash
+brew install portaudio
+pip install -r requirements.txt
+python main.py
+```
 
 ## Controls
 

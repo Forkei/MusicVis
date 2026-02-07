@@ -21,6 +21,7 @@ BUILTIN = {
         "show_ring": True,
         "ring_opacity": 0.5,
         "anamorphic_flare": 0.3,
+        "zoom": 1.0,
     },
     "EDM Rave": {
         "bloom_tint": [0.8, 0.2, 1.0],
@@ -34,6 +35,7 @@ BUILTIN = {
         "show_ring": True,
         "ring_opacity": 0.8,
         "anamorphic_flare": 0.7,
+        "zoom": 1.0,
     },
     "Chill Lo-fi": {
         "bloom_tint": [1.0, 0.7, 0.3],
@@ -47,6 +49,7 @@ BUILTIN = {
         "show_ring": True,
         "ring_opacity": 0.3,
         "anamorphic_flare": 0.1,
+        "zoom": 1.0,
     },
     "Minimal": {
         "bloom_tint": [0.9, 0.9, 1.0],
@@ -60,6 +63,7 @@ BUILTIN = {
         "show_ring": False,
         "ring_opacity": 0.0,
         "anamorphic_flare": 0.0,
+        "zoom": 1.0,
     },
     "Cinematic": {
         "bloom_tint": [0.3, 0.8, 0.9],
@@ -73,6 +77,7 @@ BUILTIN = {
         "show_ring": True,
         "ring_opacity": 0.4,
         "anamorphic_flare": 0.6,
+        "zoom": 1.0,
     },
 }
 

@@ -15,6 +15,7 @@ DEFAULT_SETTINGS = {
     "show_ring": True,
     "ring_opacity": 0.5,
     "anamorphic_flare": 0.3,
+    "zoom": 1.0,
 }
 
 
@@ -88,6 +89,13 @@ class SettingsPanel:
 
             # Shape
             if imgui.collapsing_header("Shape", imgui.TreeNodeFlags_.default_open):
+                changed, val = imgui.slider_float(
+                    "Zoom", self.settings["zoom"], 0.5, 3.0
+                )
+                if changed:
+                    self.settings["zoom"] = val
+                    self._current_preset = ""
+
                 changed, val = imgui.slider_int(
                     "Loop Count", int(self.settings["loop_count"]), 5, 25
                 )
