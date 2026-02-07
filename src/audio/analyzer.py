@@ -339,24 +339,31 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
 
     report(0.55)
 
-    # --- A3. Section segmentation ---
+    # --- A3. Section segmentation (subsampled for speed) ---
     try:
+        import warnings
         from sklearn.cluster import SpectralClustering
-        # Build recurrence matrix from chroma
+        # Subsample chroma to ~2fps to keep recurrence matrix small
+        seg_hop = max(1, int(fps / 2))
+        chroma_sub = chroma_cqt[:, ::seg_hop]
+        n_sub = chroma_sub.shape[1]
         R = librosa.segment.recurrence_matrix(
-            chroma_cqt, metric='cosine', mode='affinity', width=9, self=True
+            chroma_sub, metric='cosine', mode='affinity', width=9, self=True
         )
         n_clusters = max(2, min(8, int(duration / 20)))
-        labels = SpectralClustering(
-            n_clusters=n_clusters, affinity='precomputed', random_state=42
-        ).fit_predict(R)
-        # labels has one entry per spectrogram frame — expand to n_frames if needed
-        if len(labels) < n_frames:
-            section_labels = np.zeros(n_frames, dtype=np.int32)
-            section_labels[:len(labels)] = labels
-            section_labels[len(labels):] = labels[-1] if len(labels) > 0 else 0
-        else:
-            section_labels = labels[:n_frames].astype(np.int32)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            labels_sub = SpectralClustering(
+                n_clusters=n_clusters, affinity='precomputed', random_state=42
+            ).fit_predict(R)
+        # Upsample labels back to full frame resolution
+        section_labels = np.repeat(labels_sub, seg_hop)[:n_frames].astype(np.int32)
+        if len(section_labels) < n_frames:
+            pad = n_frames - len(section_labels)
+            section_labels = np.concatenate([
+                section_labels,
+                np.full(pad, section_labels[-1] if len(section_labels) > 0 else 0, dtype=np.int32)
+            ])
         n_sections = n_clusters
     except Exception:
         # Fallback: no segmentation
@@ -899,6 +906,17 @@ def _compute_lookahead(
         section_change.astype(np.float32),
         climax_prox.astype(np.float32),
     )
+
+
+def analyze_subprocess(audio_path, progress_val, result_queue):
+    """Entry point for multiprocessing — runs analyze() in a separate process."""
+    try:
+        def cb(p):
+            progress_val.value = p
+        result = analyze(audio_path, progress_callback=cb)
+        result_queue.put(("ok", result))
+    except Exception as e:
+        result_queue.put(("error", str(e)[:200]))
 
 
 def _detect_climaxes_edm(

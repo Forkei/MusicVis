@@ -9,9 +9,18 @@ import time
 
 COOKIE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "cookies.txt")
 _CHROME_PATHS = [
+    # Linux
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+    "/snap/bin/chromium",
+    # Windows
     os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
     os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
     os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+    # macOS
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 ]
 
 
