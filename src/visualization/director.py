@@ -23,46 +23,55 @@ _TAU_FAST = 0.16    # 160ms
 _TAU_MEDIUM = 0.33  # 330ms
 _TAU_SLOW = 0.67    # 670ms
 
-# Auto base values per genre: brightness, bloom, tint_r/g/b, anamorphic, loops, noise, rotation, fog
-_AUTO_BASES = {
-    # Moderate bases — director section/climax multipliers push these up during peaks.
-    # Even with a drop (1.5x bright, 2.0x bloom) + full climax boost, should stay sane.
+# Genre ranges for audio-driven auto values: (low, high) per setting per genre.
+# Drive signals (0-1 from audio features) map linearly through these ranges.
+# fmt: off
+_AUTO_GENRE_RANGES = {
+    #              brightness    bloom_int     anamorphic    loops       noise         rotation      fog
     0: {  # EDM
-        "brightness": 1.8, "bloom_intensity": 2.5,
-        "bloom_tint": (0.8, 0.2, 1.0), "anamorphic_flare": 0.25,
-        "loop_count": 18, "noise_mult": 0.5, "rotation_speed": 2.2, "depth_fog": 0.2,
+        "brightness": (0.8, 2.5), "bloom_intensity": (0.8, 4.0), "anamorphic_flare": (0.0, 0.7),
+        "loop_count": (8, 23),    "noise_mult": (0.15, 1.5),     "rotation_speed": (0.8, 2.8),
+        "depth_fog": (0.05, 0.5),
+        "tint_cool": (0.3, 0.1, 1.0), "tint_warm": (1.0, 0.3, 0.8),
     },
     1: {  # Rock
-        "brightness": 1.7, "bloom_intensity": 2.2,
-        "bloom_tint": (1.0, 0.4, 0.3), "anamorphic_flare": 0.2,
-        "loop_count": 15, "noise_mult": 0.35, "rotation_speed": 1.8, "depth_fog": 0.3,
+        "brightness": (0.9, 2.3), "bloom_intensity": (0.6, 3.5), "anamorphic_flare": (0.0, 0.5),
+        "loop_count": (7, 20),    "noise_mult": (0.15, 1.2),     "rotation_speed": (0.6, 2.3),
+        "depth_fog": (0.05, 0.55),
+        "tint_cool": (0.4, 0.2, 0.8), "tint_warm": (1.0, 0.5, 0.2),
     },
     2: {  # Jazz
-        "brightness": 1.4, "bloom_intensity": 1.8,
-        "bloom_tint": (1.0, 0.8, 0.3), "anamorphic_flare": 0.1,
-        "loop_count": 10, "noise_mult": 0.25, "rotation_speed": 1.2, "depth_fog": 0.45,
+        "brightness": (0.7, 1.8), "bloom_intensity": (0.5, 2.5), "anamorphic_flare": (0.0, 0.2),
+        "loop_count": (5, 14),    "noise_mult": (0.1, 0.6),      "rotation_speed": (0.3, 1.5),
+        "depth_fog": (0.15, 0.7),
+        "tint_cool": (0.2, 0.4, 0.7), "tint_warm": (1.0, 0.85, 0.3),
     },
     3: {  # Classical
-        "brightness": 1.5, "bloom_intensity": 2.0,
-        "bloom_tint": (0.5, 0.7, 1.0), "anamorphic_flare": 0.15,
-        "loop_count": 14, "noise_mult": 0.2, "rotation_speed": 1.0, "depth_fog": 0.45,
+        "brightness": (0.6, 2.2), "bloom_intensity": (0.8, 3.5), "anamorphic_flare": (0.0, 0.4),
+        "loop_count": (6, 18),    "noise_mult": (0.1, 0.7),      "rotation_speed": (0.2, 1.5),
+        "depth_fog": (0.1, 0.7),
+        "tint_cool": (0.3, 0.5, 1.0), "tint_warm": (0.9, 0.7, 0.5),
     },
     4: {  # Hip-Hop
-        "brightness": 1.7, "bloom_intensity": 2.0,
-        "bloom_tint": (0.9, 0.3, 0.5), "anamorphic_flare": 0.15,
-        "loop_count": 13, "noise_mult": 0.3, "rotation_speed": 1.5, "depth_fog": 0.3,
+        "brightness": (0.9, 2.2), "bloom_intensity": (0.5, 3.0), "anamorphic_flare": (0.0, 0.35),
+        "loop_count": (6, 17),    "noise_mult": (0.1, 0.8),      "rotation_speed": (0.4, 2.0),
+        "depth_fog": (0.05, 0.5),
+        "tint_cool": (0.4, 0.1, 0.6), "tint_warm": (1.0, 0.3, 0.4),
     },
     5: {  # Ambient
-        "brightness": 1.2, "bloom_intensity": 1.8,
-        "bloom_tint": (0.3, 0.7, 0.9), "anamorphic_flare": 0.05,
-        "loop_count": 8, "noise_mult": 0.15, "rotation_speed": 0.6, "depth_fog": 0.6,
+        "brightness": (0.5, 1.5), "bloom_intensity": (1.0, 3.0), "anamorphic_flare": (0.0, 0.15),
+        "loop_count": (5, 10),    "noise_mult": (0.1, 0.4),      "rotation_speed": (0.1, 0.8),
+        "depth_fog": (0.3, 0.85),
+        "tint_cool": (0.15, 0.4, 0.8), "tint_warm": (0.4, 0.8, 0.7),
     },
     6: {  # Pop
-        "brightness": 1.7, "bloom_intensity": 2.2,
-        "bloom_tint": (0.5, 0.7, 1.0), "anamorphic_flare": 0.2,
-        "loop_count": 15, "noise_mult": 0.25, "rotation_speed": 1.8, "depth_fog": 0.35,
+        "brightness": (0.9, 2.3), "bloom_intensity": (0.7, 3.5), "anamorphic_flare": (0.0, 0.5),
+        "loop_count": (7, 19),    "noise_mult": (0.1, 0.8),      "rotation_speed": (0.5, 2.2),
+        "depth_fog": (0.05, 0.55),
+        "tint_cool": (0.3, 0.4, 1.0), "tint_warm": (1.0, 0.5, 0.7),
     },
 }
+# fmt: on
 
 # Keys that support auto mode
 AUTO_KEYS = [
@@ -111,19 +120,19 @@ class _DirectorState:
         self.bg_intensity_offset = 0.0
         self.color_temp_shift = 0.0
         self.rotation_tempo_scale = 1.0
-        # Auto base smoothing — initialize with Pop defaults (genre 6)
-        pop = _AUTO_BASES[6]
-        self.auto_brightness = pop["brightness"]
-        self.auto_bloom_intensity = pop["bloom_intensity"]
-        self.auto_anamorphic_flare = pop["anamorphic_flare"]
-        self.auto_loop_count = float(pop["loop_count"])
-        self.auto_noise_mult = pop["noise_mult"]
-        self.auto_rotation_speed = pop["rotation_speed"]
-        self.auto_depth_fog = pop["depth_fog"]
-        tint = pop["bloom_tint"]
-        self.auto_tint_r = tint[0]
-        self.auto_tint_g = tint[1]
-        self.auto_tint_b = tint[2]
+        # Auto values — initialize at midpoint of Pop ranges (subdued ball)
+        pop = _AUTO_GENRE_RANGES[6]
+        self.auto_brightness = sum(pop["brightness"]) / 2.0
+        self.auto_bloom_intensity = sum(pop["bloom_intensity"]) / 2.0
+        self.auto_anamorphic_flare = sum(pop["anamorphic_flare"]) / 2.0
+        self.auto_loop_count = sum(pop["loop_count"]) / 2.0
+        self.auto_noise_mult = sum(pop["noise_mult"]) / 2.0
+        self.auto_rotation_speed = sum(pop["rotation_speed"]) / 2.0
+        self.auto_depth_fog = sum(pop["depth_fog"]) / 2.0
+        cool, warm = pop["tint_cool"], pop["tint_warm"]
+        self.auto_tint_r = (cool[0] + warm[0]) / 2.0
+        self.auto_tint_g = (cool[1] + warm[1]) / 2.0
+        self.auto_tint_b = (cool[2] + warm[2]) / 2.0
 
 
 class _GenreProfile:
@@ -303,6 +312,114 @@ class MusicalDirector:
         """Reset state (called on song switch)."""
         self._state.reset()
 
+    def _compute_auto_values(self, features: dict, genre_id: int) -> dict:
+        """Compute raw auto-value targets from live audio features.
+
+        Each setting has a drive formula — a weighted sum of 0-1 audio features
+        that maps through a genre-specific (low, high) range. Two moments within
+        the same section produce different values if the audio differs.
+        """
+        gr = _AUTO_GENRE_RANGES.get(genre_id, _AUTO_GENRE_RANGES[6])
+
+        # Extract features (all normalized 0-1 except tempo)
+        rms = features.get("rms", 0.0)
+        arousal = features.get("arousal", 0.5)
+        valence = features.get("valence", 0.5)
+        climax = features.get("climax_score", 0.0)
+        bass = features.get("bass_energy", 0.0)
+        mid = features.get("mid_energy", 0.0)
+        treble = features.get("treble_energy", 0.0)
+        vocal = features.get("vocal_presence", 0.0)
+        flux = features.get("spectral_flux", 0.0)
+        centroid = features.get("spectral_centroid", 0.0)
+        sharpness = features.get("onset_sharpness", 0.0)
+        density = features.get("rhythmic_density", 0.0)
+        explosion = features.get("explosion_factor", 0.0)
+        anticipation = features.get("anticipation_factor", 0.0)
+        snare = features.get("snare_pulse", 0.0)
+        groove = features.get("groove_factor", 0.0)
+        tempo = features.get("tempo", 120.0)
+        trajectory = features.get("energy_trajectory", 0.0)
+
+        def _clamp01(x):
+            return max(0.0, min(1.0, x))
+
+        def _lerp(lo, hi, t):
+            return lo + (hi - lo) * t
+
+        def _lerp_range(key, drive):
+            lo, hi = gr[key]
+            return _lerp(lo, hi, _clamp01(drive))
+
+        # 1. Brightness — "how much energy hits you"
+        brightness_drive = rms * 0.35 + arousal * 0.20 + climax * 0.20 + mid * 0.10 + explosion * 0.15
+        brightness = _lerp_range("brightness", brightness_drive)
+
+        # 2. Bloom Intensity — "ethereal glow"
+        bloom_drive = (rms * 0.20 + arousal * 0.15 + climax * 0.25 + treble * 0.10
+                       + vocal * 0.10 + anticipation * 0.10 + centroid * 0.10)
+        bloom_intensity = _lerp_range("bloom_intensity", bloom_drive)
+
+        # 3. Bloom Tint — "color identity" (cool ↔ warm)
+        warmth = (valence * 0.40 + centroid * 0.20 + bass * 0.15
+                  + (1.0 - treble) * 0.10 + vocal * 0.15)
+        warmth = _clamp01(warmth)
+        cool = gr["tint_cool"]
+        warm = gr["tint_warm"]
+        tint_r = _lerp(cool[0], warm[0], warmth)
+        tint_g = _lerp(cool[1], warm[1], warmth)
+        tint_b = _lerp(cool[2], warm[2], warmth)
+
+        # 4. Anamorphic Flare — "cinematic lens streaks"
+        anamorphic_drive = climax * 0.30 + rms * 0.20 + explosion * 0.20 + centroid * 0.15 + snare * 0.15
+        anamorphic = _lerp_range("anamorphic_flare", anamorphic_drive)
+
+        # 5. Loop Count — "visual complexity"
+        loop_drive = arousal * 0.30 + density * 0.25 + rms * 0.15 + flux * 0.15 + (1.0 - vocal) * 0.15
+        loop_count = _lerp_range("loop_count", loop_drive)
+
+        # 6. Noise Mult — "wire deformation/chaos"
+        noise_drive = (flux * 0.25 + sharpness * 0.20 + density * 0.15
+                       + arousal * 0.15 + anticipation * 0.15 + (1.0 - vocal) * 0.10)
+        noise_mult = _lerp_range("noise_mult", noise_drive)
+
+        # 7. Rotation Speed — "spin momentum"
+        tempo_norm = _clamp01((tempo - 60.0) / 140.0)
+        rotation_drive = (arousal * 0.25 + tempo_norm * 0.20 + density * 0.15
+                          + flux * 0.15 + groove * 0.10 + bass * 0.15)
+        rotation_speed = _lerp_range("rotation_speed", rotation_drive)
+
+        # 8. Depth Fog — "atmospheric depth" (INVERSE energy)
+        fog_drive = ((1.0 - arousal) * 0.25 + (1.0 - rms) * 0.20 + vocal * 0.15
+                     + (1.0 - climax) * 0.15 + (1.0 - centroid) * 0.10
+                     + max(0.0, -trajectory) * 0.15)
+        depth_fog = _lerp_range("depth_fog", fog_drive)
+
+        return {
+            "brightness": brightness,
+            "bloom_intensity": bloom_intensity,
+            "tint_r": tint_r, "tint_g": tint_g, "tint_b": tint_b,
+            "anamorphic_flare": anamorphic,
+            "loop_count": loop_count,
+            "noise_mult": noise_mult,
+            "rotation_speed": rotation_speed,
+            "depth_fog": depth_fog,
+        }
+
+    def _smooth_auto_state(self, auto_targets: dict, dt: float):
+        """Smooth auto values toward their computed targets."""
+        s = self._state
+        s.auto_brightness = _exp_smooth(s.auto_brightness, auto_targets["brightness"], _TAU_FAST, dt)
+        s.auto_bloom_intensity = _exp_smooth(s.auto_bloom_intensity, auto_targets["bloom_intensity"], _TAU_MEDIUM, dt)
+        s.auto_anamorphic_flare = _exp_smooth(s.auto_anamorphic_flare, auto_targets["anamorphic_flare"], _TAU_FAST, dt)
+        s.auto_loop_count = _exp_smooth(s.auto_loop_count, auto_targets["loop_count"], _TAU_SLOW, dt)
+        s.auto_noise_mult = _exp_smooth(s.auto_noise_mult, auto_targets["noise_mult"], _TAU_MEDIUM, dt)
+        s.auto_rotation_speed = _exp_smooth(s.auto_rotation_speed, auto_targets["rotation_speed"], _TAU_MEDIUM, dt)
+        s.auto_depth_fog = _exp_smooth(s.auto_depth_fog, auto_targets["depth_fog"], _TAU_SLOW, dt)
+        s.auto_tint_r = _exp_smooth(s.auto_tint_r, auto_targets["tint_r"], _TAU_SLOW, dt)
+        s.auto_tint_g = _exp_smooth(s.auto_tint_g, auto_targets["tint_g"], _TAU_SLOW, dt)
+        s.auto_tint_b = _exp_smooth(s.auto_tint_b, auto_targets["tint_b"], _TAU_SLOW, dt)
+
     def process(self, features: dict, base_settings: dict, delta_time: float) -> dict:
         """Main per-frame call. Returns modified settings dict.
 
@@ -323,7 +440,10 @@ class MusicalDirector:
             result["director_genre"] = ""
             result["director_section"] = ""
             result["director_climax"] = 0.0
-            # Still provide auto values for UI display (genre bases, no modulation)
+            # Still compute + smooth auto values from audio for UI display
+            genre_id = features.get("genre_id", 6)
+            auto_targets = self._compute_auto_values(features, genre_id)
+            self._smooth_auto_state(auto_targets, delta_time)
             s = self._state
             result["_auto_values"] = {
                 "brightness": s.auto_brightness,
@@ -335,31 +455,21 @@ class MusicalDirector:
                 "rotation_speed": s.auto_rotation_speed,
                 "depth_fog": s.auto_depth_fog,
             }
-            # Still smooth auto bases even when director is off
-            genre_id = features.get("genre_id", 6)
-            ab = _AUTO_BASES.get(genre_id, _AUTO_BASES[6])
-            s.auto_brightness = _exp_smooth(s.auto_brightness, ab["brightness"], _TAU_SLOW, delta_time)
-            s.auto_bloom_intensity = _exp_smooth(s.auto_bloom_intensity, ab["bloom_intensity"], _TAU_SLOW, delta_time)
-            s.auto_anamorphic_flare = _exp_smooth(s.auto_anamorphic_flare, ab["anamorphic_flare"], _TAU_SLOW, delta_time)
-            s.auto_loop_count = _exp_smooth(s.auto_loop_count, float(ab["loop_count"]), _TAU_SLOW, delta_time)
-            s.auto_noise_mult = _exp_smooth(s.auto_noise_mult, ab["noise_mult"], _TAU_SLOW, delta_time)
-            s.auto_rotation_speed = _exp_smooth(s.auto_rotation_speed, ab["rotation_speed"], _TAU_SLOW, delta_time)
-            s.auto_depth_fog = _exp_smooth(s.auto_depth_fog, ab["depth_fog"], _TAU_SLOW, delta_time)
-            tint = ab["bloom_tint"]
-            s.auto_tint_r = _exp_smooth(s.auto_tint_r, tint[0], _TAU_SLOW, delta_time)
-            s.auto_tint_g = _exp_smooth(s.auto_tint_g, tint[1], _TAU_SLOW, delta_time)
-            s.auto_tint_b = _exp_smooth(s.auto_tint_b, tint[2], _TAU_SLOW, delta_time)
             return result
 
         intensity = base_settings.get("director_intensity", 0.8)
         genre_id = features.get("genre_id", 6)
         profile = _PROFILES.get(genre_id, _PROFILES[6])
 
-        # Compute raw targets
+        # Compute raw targets for director multipliers (trail, particles, hue, etc.)
         targets = self._compute_targets(features, profile, base_settings)
 
-        # Smooth state (including auto bases toward current genre)
-        self._smooth_state(targets, delta_time, genre_id)
+        # Compute audio-driven auto values for the 8 auto settings
+        auto_targets = self._compute_auto_values(features, genre_id)
+
+        # Smooth all state
+        self._smooth_state(targets, delta_time)
+        self._smooth_auto_state(auto_targets, delta_time)
 
         # Apply to settings
         return self._apply_to_settings(base_settings, intensity, features, profile)
@@ -540,8 +650,8 @@ class MusicalDirector:
             "rotation_tempo_scale": rotation_tempo_scale,
         }
 
-    def _smooth_state(self, targets: dict, dt: float, genre_id: int = 6):
-        """Exponential smoothing of director state."""
+    def _smooth_state(self, targets: dict, dt: float):
+        """Exponential smoothing of director state (non-auto outputs)."""
         s = self._state
         s.brightness_mult = _exp_smooth(s.brightness_mult, targets["brightness"], _TAU_MEDIUM, dt)
         s.energy_mult_mult = _exp_smooth(s.energy_mult_mult, targets["energy"], _TAU_MEDIUM, dt)
@@ -562,74 +672,79 @@ class MusicalDirector:
         s.color_temp_shift = _exp_smooth(s.color_temp_shift, targets["color_temp_shift"], _TAU_SLOW, dt)
         s.rotation_tempo_scale = _exp_smooth(s.rotation_tempo_scale, targets["rotation_tempo_scale"], _TAU_SLOW, dt)
 
-        # Smooth auto bases toward current genre's target values
-        ab = _AUTO_BASES.get(genre_id, _AUTO_BASES[6])
-        s.auto_brightness = _exp_smooth(s.auto_brightness, ab["brightness"], _TAU_SLOW, dt)
-        s.auto_bloom_intensity = _exp_smooth(s.auto_bloom_intensity, ab["bloom_intensity"], _TAU_SLOW, dt)
-        s.auto_anamorphic_flare = _exp_smooth(s.auto_anamorphic_flare, ab["anamorphic_flare"], _TAU_SLOW, dt)
-        s.auto_loop_count = _exp_smooth(s.auto_loop_count, float(ab["loop_count"]), _TAU_SLOW, dt)
-        s.auto_noise_mult = _exp_smooth(s.auto_noise_mult, ab["noise_mult"], _TAU_SLOW, dt)
-        s.auto_rotation_speed = _exp_smooth(s.auto_rotation_speed, ab["rotation_speed"], _TAU_SLOW, dt)
-        s.auto_depth_fog = _exp_smooth(s.auto_depth_fog, ab["depth_fog"], _TAU_SLOW, dt)
-        tint = ab["bloom_tint"]
-        s.auto_tint_r = _exp_smooth(s.auto_tint_r, tint[0], _TAU_SLOW, dt)
-        s.auto_tint_g = _exp_smooth(s.auto_tint_g, tint[1], _TAU_SLOW, dt)
-        s.auto_tint_b = _exp_smooth(s.auto_tint_b, tint[2], _TAU_SLOW, dt)
-
     def _apply_to_settings(self, base: dict, intensity: float, features: dict,
                            profile: _GenreProfile) -> dict:
         """Blend director state with user settings using director_intensity."""
         s = self._state
         result = dict(base)
 
-        # Smoothed genre bases (used as effective base when auto is on)
-        auto_base_brightness = s.auto_brightness
-        auto_base_bloom = s.auto_bloom_intensity
-        auto_base_noise = s.auto_noise_mult
-        auto_base_rotation = s.auto_rotation_speed
-        auto_base_anamorphic = s.auto_anamorphic_flare
-        auto_base_fog = s.auto_depth_fog
-        auto_base_loops = int(round(s.auto_loop_count))
-        auto_base_tint = (s.auto_tint_r, s.auto_tint_g, s.auto_tint_b)
+        # Smoothed audio-driven auto values
+        auto_brightness = s.auto_brightness
+        auto_bloom = s.auto_bloom_intensity
+        auto_noise = s.auto_noise_mult
+        auto_rotation = s.auto_rotation_speed
+        auto_anamorphic = s.auto_anamorphic_flare
+        auto_fog = s.auto_depth_fog
+        auto_loops = int(round(s.auto_loop_count))
+        auto_tint = (s.auto_tint_r, s.auto_tint_g, s.auto_tint_b)
 
-        # Resolve effective base: use auto genre base when auto flag is True
-        eff_brightness = auto_base_brightness if base.get("auto_brightness", True) else base["brightness"]
-        eff_bloom = auto_base_bloom if base.get("auto_bloom_intensity", True) else base["bloom_intensity"]
-        eff_noise = auto_base_noise if base.get("auto_noise_mult", True) else base["noise_mult"]
-        eff_rotation = auto_base_rotation if base.get("auto_rotation_speed", True) else base["rotation_speed"]
-        eff_anamorphic = auto_base_anamorphic if base.get("auto_anamorphic_flare", True) else base["anamorphic_flare"]
-        eff_fog = auto_base_fog if base.get("auto_depth_fog", True) else base["depth_fog"]
-        eff_loops = auto_base_loops if base.get("auto_loop_count", True) else base["loop_count"]
-        if base.get("auto_bloom_tint", True):
-            result["bloom_tint"] = auto_base_tint
-
-        # Blend multipliers: lerp between 1.0 (no change) and director value
+        # Blend multiplier for manual-mode settings (director still modulates them)
         def _blend_mult(base_val, mult):
             adjusted = base_val * (1.0 + (mult - 1.0) * intensity)
             return max(0.0, adjusted)
 
-        result["brightness"] = _blend_mult(eff_brightness, s.brightness_mult)
+        # When auto ON: use audio-driven value directly (already contains all modulation).
+        # When auto OFF: use manual slider value × director blend_mult (existing behavior).
+        if base.get("auto_brightness", True):
+            result["brightness"] = auto_brightness
+        else:
+            result["brightness"] = _blend_mult(base["brightness"], s.brightness_mult)
+
         result["energy_mult"] = _blend_mult(base["energy_mult"], s.energy_mult_mult)
-        result["bloom_intensity"] = _blend_mult(eff_bloom, s.bloom_mult)
-        result["noise_mult"] = _blend_mult(eff_noise, s.noise_mult_mult)
-        result["rotation_speed"] = _blend_mult(eff_rotation, s.rotation_mult)
-        result["anamorphic_flare"] = min(1.0, _blend_mult(eff_anamorphic, s.anamorphic_mult))
 
-        # Additive offsets
-        result["depth_fog"] = max(0.0, min(1.0, eff_fog + s.depth_fog_offset * intensity))
-        result["loop_count"] = max(5, min(25, int(eff_loops + s.loop_count_offset * intensity)))
+        if base.get("auto_bloom_intensity", True):
+            result["bloom_intensity"] = auto_bloom
+        else:
+            result["bloom_intensity"] = _blend_mult(base["bloom_intensity"], s.bloom_mult)
 
-        # _auto_values = final directed values (live-animated for UI display)
-        # These show what the auto mode *actually produces* including section/climax modulation.
+        if base.get("auto_noise_mult", True):
+            result["noise_mult"] = auto_noise
+        else:
+            result["noise_mult"] = _blend_mult(base["noise_mult"], s.noise_mult_mult)
+
+        if base.get("auto_rotation_speed", True):
+            result["rotation_speed"] = auto_rotation
+        else:
+            result["rotation_speed"] = _blend_mult(base["rotation_speed"], s.rotation_mult)
+
+        if base.get("auto_anamorphic_flare", True):
+            result["anamorphic_flare"] = min(1.0, auto_anamorphic)
+        else:
+            result["anamorphic_flare"] = min(1.0, _blend_mult(base["anamorphic_flare"], s.anamorphic_mult))
+
+        if base.get("auto_depth_fog", True):
+            result["depth_fog"] = max(0.0, min(1.0, auto_fog))
+        else:
+            result["depth_fog"] = max(0.0, min(1.0, base["depth_fog"] + s.depth_fog_offset * intensity))
+
+        if base.get("auto_loop_count", True):
+            result["loop_count"] = max(5, min(25, auto_loops))
+        else:
+            result["loop_count"] = max(5, min(25, int(base["loop_count"] + s.loop_count_offset * intensity)))
+
+        if base.get("auto_bloom_tint", True):
+            result["bloom_tint"] = auto_tint
+
+        # _auto_values for UI display — always shows what audio-driven auto produces
         result["_auto_values"] = {
-            "brightness": _blend_mult(auto_base_brightness, s.brightness_mult),
-            "bloom_intensity": _blend_mult(auto_base_bloom, s.bloom_mult),
-            "bloom_tint": auto_base_tint,
-            "anamorphic_flare": min(1.0, _blend_mult(auto_base_anamorphic, s.anamorphic_mult)),
-            "loop_count": max(5, min(25, int(auto_base_loops + s.loop_count_offset * intensity))),
-            "noise_mult": _blend_mult(auto_base_noise, s.noise_mult_mult),
-            "rotation_speed": _blend_mult(auto_base_rotation, s.rotation_mult),
-            "depth_fog": max(0.0, min(1.0, auto_base_fog + s.depth_fog_offset * intensity)),
+            "brightness": auto_brightness,
+            "bloom_intensity": auto_bloom,
+            "bloom_tint": auto_tint,
+            "anamorphic_flare": min(1.0, auto_anamorphic),
+            "loop_count": max(5, min(25, auto_loops)),
+            "noise_mult": auto_noise,
+            "rotation_speed": auto_rotation,
+            "depth_fog": max(0.0, min(1.0, auto_fog)),
         }
 
         # Trail and particle rates (direct from director)
