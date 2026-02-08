@@ -1,0 +1,15 @@
+# Optional ML dependencies for enhanced audio analysis.
+# Install with: pip install -r requirements-ml.txt
+#
+# These provide neural-network-based genre classification, vocal detection,
+# valence/arousal estimation, and music structure analysis. Without these,
+# the app falls back to heuristic analysis (works identically).
+#
+# Windows note for allin1:
+#   allin1 requires NATTEN (neighborhood attention). Either:
+#   - Set NATTEN_USE_FLEX=1 environment variable (uses Flex Attention backend), or
+#   - Install a third-party NATTEN wheel from github.com/SHI-Labs/NATTEN/releases
+
+torch>=2.0
+allin1>=1.0
+onnxruntime>=1.16

@@ -5,9 +5,18 @@ onset sharpness, and buildup/drop detection tuned for electronic music.
 """
 
 from dataclasses import dataclass
+import logging
 import numpy as np
 import librosa
 from scipy.ndimage import maximum_filter1d, minimum_filter1d, uniform_filter1d
+
+from src.audio.ml_analyzer import (
+    _ML_AVAILABLE, ml_classify_genre, ml_detect_vocal,
+    ml_compute_valence_arousal, ml_analyze_structure,
+    clear_embedding_cache,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -358,46 +367,82 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
 
     report(0.55)
 
-    # --- A3. Section segmentation (subsampled for speed) ---
-    try:
-        import warnings
-        from sklearn.cluster import SpectralClustering
-        # Subsample chroma to ~2fps to keep recurrence matrix small
-        seg_hop = max(1, int(fps / 2))
-        chroma_sub = chroma_cqt[:, ::seg_hop]
-        n_sub = chroma_sub.shape[1]
-        R = librosa.segment.recurrence_matrix(
-            chroma_sub, metric='cosine', mode='affinity', width=9, self=True
+    # --- A3. Section segmentation ---
+    # ML structure analysis provides segmentation + section types + tempo in one pass.
+    # We compute it here (early) so later steps can use ML section info.
+    _ml_structure_done = False
+    section_type = None
+    section_boundaries_arr = None
+    n_section_boundaries = 0
+    _ml_tempo = None
+
+    if _ML_AVAILABLE["allin1"]:
+        def _structure_fallback():
+            return None  # signal to fall through to heuristic
+
+        ml_result = ml_analyze_structure(
+            audio_path, sr, hop_length, n_frames, fps,
+            rms, bass_energy, onset_strength,
+            fallback_fn=_structure_fallback,
         )
-        n_clusters = max(2, min(8, int(duration / 20)))
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            labels_sub = SpectralClustering(
-                n_clusters=n_clusters, affinity='precomputed', random_state=42
-            ).fit_predict(R)
-        # Upsample labels back to full frame resolution
-        section_labels = np.repeat(labels_sub, seg_hop)[:n_frames].astype(np.int32)
-        if len(section_labels) < n_frames:
-            pad = n_frames - len(section_labels)
-            section_labels = np.concatenate([
-                section_labels,
-                np.full(pad, section_labels[-1] if len(section_labels) > 0 else 0, dtype=np.int32)
-            ])
-        n_sections = n_clusters
-    except Exception:
-        # Fallback: no segmentation
-        section_labels = np.zeros(n_frames, dtype=np.int32)
-        n_sections = 1
+        if ml_result is not None:
+            (section_labels, n_sections, section_type,
+             section_boundaries_arr, n_section_boundaries, _ml_tempo) = ml_result
+            _ml_structure_done = True
+            if _ml_tempo and _ml_tempo > 30.0:
+                tempo_val = _ml_tempo
+                # Recalculate tempo-synced window
+                beat_dur = 60.0 / tempo_val
+                window_s = 8.0 * beat_dur
+
+    if not _ml_structure_done:
+        # Heuristic: chroma-based structural similarity
+        try:
+            import warnings
+            from sklearn.cluster import SpectralClustering
+            seg_hop = max(1, int(fps / 2))
+            chroma_sub = chroma_cqt[:, ::seg_hop]
+            n_sub = chroma_sub.shape[1]
+            R = librosa.segment.recurrence_matrix(
+                chroma_sub, metric='cosine', mode='affinity', width=9, self=True
+            )
+            n_clusters = max(3, min(10, int(duration / 15)))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                labels_sub = SpectralClustering(
+                    n_clusters=n_clusters, affinity='precomputed', random_state=42
+                ).fit_predict(R)
+            section_labels = np.repeat(labels_sub, seg_hop)[:n_frames].astype(np.int32)
+            if len(section_labels) < n_frames:
+                pad = n_frames - len(section_labels)
+                section_labels = np.concatenate([
+                    section_labels,
+                    np.full(pad, section_labels[-1] if len(section_labels) > 0 else 0, dtype=np.int32)
+                ])
+            n_sections = n_clusters
+        except Exception:
+            section_labels = np.zeros(n_frames, dtype=np.int32)
+            n_sections = 1
 
     report(0.65)
 
     # --- A4. Vocal detection ---
-    vocal_band = S[15:80, :]  # ~300Hz-3kHz
-    geo = np.exp(np.mean(np.log(vocal_band + 1e-8), axis=0))
-    arith = np.mean(vocal_band, axis=0)
-    flatness = geo / (arith + 1e-8)
-    vocal_presence = 1.0 - _normalize(flatness)
-    vocal_presence = _local_normalize(vocal_presence, window_s, fps)
+    if _ML_AVAILABLE["onnx"]:
+        def _vocal_fallback():
+            vocal_band = S[15:80, :]
+            geo = np.exp(np.mean(np.log(vocal_band + 1e-8), axis=0))
+            arith = np.mean(vocal_band, axis=0)
+            flatness = geo / (arith + 1e-8)
+            vp = 1.0 - _normalize(flatness)
+            return _local_normalize(vp, window_s, fps)
+        vocal_presence = ml_detect_vocal(audio_path, sr, n_frames, fps, _vocal_fallback)
+    else:
+        vocal_band = S[15:80, :]
+        geo = np.exp(np.mean(np.log(vocal_band + 1e-8), axis=0))
+        arith = np.mean(vocal_band, axis=0)
+        flatness = geo / (arith + 1e-8)
+        vocal_presence = 1.0 - _normalize(flatness)
+        vocal_presence = _local_normalize(vocal_presence, window_s, fps)
 
     report(0.70)
 
@@ -432,17 +477,27 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     report(0.82)
 
     # --- Genre classification ---
-    genre_id, genre_confidence, genre_features = _classify_genre(
-        tempo_val, S, bass_raw, mid_raw, treble_raw, rms_raw, onset_env, cent, chroma_cqt, n_frames, fps
-    )
+    if _ML_AVAILABLE["onnx"]:
+        def _genre_fallback():
+            return _classify_genre(
+                tempo_val, S, bass_raw, mid_raw, treble_raw, rms_raw, onset_env, cent, chroma_cqt, n_frames, fps
+            )
+        genre_id, genre_confidence, genre_features = ml_classify_genre(
+            audio_path, sr, _genre_fallback,
+        )
+    else:
+        genre_id, genre_confidence, genre_features = _classify_genre(
+            tempo_val, S, bass_raw, mid_raw, treble_raw, rms_raw, onset_env, cent, chroma_cqt, n_frames, fps
+        )
 
     report(0.84)
 
     # --- Section type labeling ---
-    section_type, section_boundaries_arr, n_section_boundaries = _label_sections(
-        section_labels, rms, spectral_centroid, onset_strength, bass_energy,
-        vocal_presence, n_frames, fps, genre_id, duration
-    )
+    if not _ml_structure_done:
+        section_type, section_boundaries_arr, n_section_boundaries = _label_sections(
+            section_labels, rms, spectral_centroid, onset_strength, bass_energy,
+            vocal_presence, spectral_flux, n_frames, fps, genre_id, duration
+        )
 
     report(0.87)
 
@@ -460,9 +515,18 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     report(0.92)
 
     # --- Valence / Arousal ---
-    valence_arr, arousal_arr = _compute_valence_arousal(
-        chroma_cqt, cent, rms, spectral_flux, tempo_val, n_frames, fps
-    )
+    if _ML_AVAILABLE["onnx"]:
+        def _va_fallback():
+            return _compute_valence_arousal(
+                chroma_cqt, cent, rms, spectral_flux, tempo_val, n_frames, fps
+            )
+        valence_arr, arousal_arr = ml_compute_valence_arousal(
+            audio_path, sr, n_frames, fps, _va_fallback,
+        )
+    else:
+        valence_arr, arousal_arr = _compute_valence_arousal(
+            chroma_cqt, cent, rms, spectral_flux, tempo_val, n_frames, fps
+        )
 
     report(0.94)
 
@@ -475,6 +539,9 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     lookahead_energy_delta, lookahead_section_change, lookahead_climax = _compute_lookahead(
         rms, section_boundaries_arr, climax_score, n_frames, fps
     )
+
+    # Free ML embedding cache (no longer needed after analysis)
+    clear_embedding_cache()
 
     report(1.0)
 
@@ -628,87 +695,261 @@ def _label_sections(
     onset: np.ndarray,
     bass: np.ndarray,
     vocal: np.ndarray,
+    flux: np.ndarray,
     n_frames: int,
     fps: float,
     genre_id: int,
     duration: float,
 ) -> tuple[np.ndarray, np.ndarray, int]:
-    """Label section clusters into meaningful types.
+    """Label section clusters into meaningful types using multi-feature scoring.
 
     Section types: 0=intro, 1=verse, 2=chorus, 3=bridge, 4=breakdown,
                    5=buildup, 6=drop, 7=outro, 8=solo.
+
+    Two-pass system:
+      1) Score each section for every type based on multiple features
+      2) Refine with temporal context (buildups before peaks, etc.)
+
     Returns (section_type_per_frame, boundary_frames, n_boundaries).
     """
     # Find boundaries where cluster ID changes
     changes = np.where(np.diff(section_labels) != 0)[0] + 1
     boundaries = np.concatenate([[0], changes])
     n_boundaries = len(changes)
-
-    # Compute per-section aggregate features
-    section_type = np.zeros(n_frames, dtype=np.int32)
     n_sections = len(boundaries)
 
-    # Song-relative thresholds for better discrimination
-    rms_p25 = float(np.percentile(rms, 25))
-    rms_p50 = float(np.percentile(rms, 50))
-    rms_p75 = float(np.percentile(rms, 75))
-    bass_p50 = float(np.percentile(bass, 50))
-    bass_p75 = float(np.percentile(bass, 75))
-    onset_p50 = float(np.percentile(onset, 50))
-    cent_p75 = float(np.percentile(centroid, 75))
+    section_type = np.zeros(n_frames, dtype=np.int32)
 
+    if n_sections < 2:
+        # Single section: just call it verse
+        section_type[:] = 1
+        boundary_arr = np.zeros(1, dtype=np.int32)
+        return section_type, boundary_arr, 0
+
+    # --- Compute per-section features ---
+    sec_features = []
     for sec_idx in range(n_sections):
         start = boundaries[sec_idx]
         end = boundaries[sec_idx + 1] if sec_idx + 1 < n_sections else n_frames
+        seg_len = end - start
 
         seg_rms = float(np.mean(rms[start:end]))
         seg_cent = float(np.mean(centroid[start:end]))
         seg_onset = float(np.mean(onset[start:end]))
         seg_bass = float(np.mean(bass[start:end]))
         seg_vocal = float(np.mean(vocal[start:end]))
-        seg_pos = (start + end) / 2.0 / n_frames  # position in song (0-1)
+        seg_flux = float(np.mean(flux[start:end]))
+        seg_pos = (start + end) / 2.0 / n_frames  # 0-1 position in song
 
         # Energy trajectory within section
-        seg_len = end - start
         if seg_len > int(fps * 2):
-            first_q = float(np.mean(rms[start:start + seg_len // 4]))
-            last_q = float(np.mean(rms[end - seg_len // 4:end]))
-            energy_rising = last_q - first_q
+            q_len = max(1, seg_len // 4)
+            first_q = float(np.mean(rms[start:start + q_len]))
+            last_q = float(np.mean(rms[end - q_len:end]))
+            energy_slope = last_q - first_q
         else:
-            energy_rising = 0.0
+            energy_slope = 0.0
 
-        # Rule-based labeling using song-relative thresholds
-        stype = 1  # default = verse
+        # Onset trajectory (increasing onsets = buildup character)
+        if seg_len > int(fps * 2):
+            q_len = max(1, seg_len // 4)
+            onset_first = float(np.mean(onset[start:start + q_len]))
+            onset_last = float(np.mean(onset[end - q_len:end]))
+            onset_slope = onset_last - onset_first
+        else:
+            onset_slope = 0.0
 
-        if sec_idx == 0 and seg_pos < 0.15 and seg_rms < rms_p50:
-            stype = 0  # intro
-        elif sec_idx == n_sections - 1 and seg_pos > 0.85 and seg_rms < rms_p50:
-            stype = 7  # outro
-        elif seg_bass > bass_p75 and seg_rms > rms_p75:
-            stype = 6  # drop (any genre with high bass + high energy)
-        elif seg_rms < rms_p25 and seg_onset < onset_p50 * 0.5:
-            stype = 4  # breakdown (quiet + sparse)
-        elif energy_rising > 0.10 and seg_onset > onset_p50:
-            stype = 5  # buildup (energy rising + active onsets)
-        elif seg_rms > rms_p75 and seg_vocal > 0.5:
-            stype = 2  # chorus (loud + vocal)
-        elif seg_rms > rms_p75 and seg_cent > cent_p75:
-            stype = 2  # chorus (loud + bright, instrumental)
-        elif seg_cent > cent_p75 and seg_vocal < 0.3 and seg_onset > onset_p50:
-            stype = 8  # solo (bright + non-vocal + active)
-        elif seg_rms < rms_p50 and seg_rms > rms_p25:
-            # Moderate energy — verse or bridge
-            cluster_id = section_labels[start]
-            cluster_count = np.sum(section_labels == cluster_id)
-            if cluster_count < n_frames * 0.15:
-                stype = 3  # bridge (rare cluster)
-            else:
-                stype = 1  # verse
-        # else: default verse
+        # Contrast with previous section
+        if sec_idx > 0:
+            prev_start = boundaries[sec_idx - 1]
+            prev_end = start
+            prev_rms = float(np.mean(rms[prev_start:prev_end]))
+            contrast_rms = seg_rms - prev_rms
+        else:
+            contrast_rms = 0.0
 
-        section_type[start:end] = stype
+        # Cluster rarity (rare clusters → bridge/solo)
+        cluster_id = section_labels[start]
+        cluster_frames = int(np.sum(section_labels == cluster_id))
+        cluster_rarity = 1.0 - cluster_frames / n_frames
 
-    # Boundary array (frame indices where section changes)
+        sec_features.append({
+            "start": start, "end": end, "idx": sec_idx,
+            "rms": seg_rms, "centroid": seg_cent, "onset": seg_onset,
+            "bass": seg_bass, "vocal": seg_vocal, "flux": seg_flux,
+            "pos": seg_pos, "energy_slope": energy_slope,
+            "onset_slope": onset_slope, "contrast_rms": contrast_rms,
+            "cluster_rarity": cluster_rarity, "length_s": seg_len / fps,
+        })
+
+    # --- Song-relative percentiles (computed over section means) ---
+    all_rms = np.array([s["rms"] for s in sec_features])
+    all_bass = np.array([s["bass"] for s in sec_features])
+    all_onset = np.array([s["onset"] for s in sec_features])
+    all_cent = np.array([s["centroid"] for s in sec_features])
+
+    rms_median = float(np.median(all_rms))
+    rms_range = float(np.ptp(all_rms)) + 1e-8
+    bass_median = float(np.median(all_bass))
+    bass_range = float(np.ptp(all_bass)) + 1e-8
+    onset_median = float(np.median(all_onset))
+    cent_median = float(np.median(all_cent))
+
+    def _rank(val, arr):
+        """Percentile rank of val among arr values (0-1)."""
+        return float(np.mean(arr <= val))
+
+    # --- Pass 1: Score each section for each type ---
+    # 9 types: intro(0), verse(1), chorus(2), bridge(3), breakdown(4),
+    #          buildup(5), drop(6), outro(7), solo(8)
+    section_scores = []
+
+    for sf in sec_features:
+        scores = np.zeros(9, dtype=np.float64)
+        rms_rank = _rank(sf["rms"], all_rms)
+        bass_rank = _rank(sf["bass"], all_bass)
+        onset_rank = _rank(sf["onset"], all_onset)
+        cent_rank = _rank(sf["centroid"], all_cent)
+
+        # --- Intro (0): early position + below-average energy ---
+        if sf["pos"] < 0.2:
+            scores[0] += (0.2 - sf["pos"]) * 5.0  # closer to start = higher
+            scores[0] += (1.0 - rms_rank) * 0.5    # quieter = more intro-like
+            if sf["energy_slope"] > 0:
+                scores[0] += 0.3  # energy rising in intro is typical
+            if sf["idx"] == 0:
+                scores[0] += 0.5  # first section bonus
+
+        # --- Verse (1): moderate energy, common pattern, stable ---
+        scores[1] += 0.4  # base score (it's the natural default)
+        if 0.2 < rms_rank < 0.8:
+            scores[1] += 0.5  # moderate energy
+        scores[1] += (1.0 - sf["cluster_rarity"]) * 0.4  # common cluster
+        if sf["vocal"] > 0.3:
+            scores[1] += 0.2  # vocals present
+        if sf["length_s"] > 15:
+            scores[1] += 0.3  # long steady sections are usually verse
+        if abs(sf["energy_slope"]) < 0.03:
+            scores[1] += 0.2  # stable energy = verse-like
+
+        # --- Chorus (2): high energy, bright, often vocal ---
+        scores[2] += rms_rank * 0.5           # loud
+        scores[2] += cent_rank * 0.3          # bright
+        scores[2] += onset_rank * 0.2         # active
+        if sf["vocal"] > 0.4:
+            scores[2] += 0.3                   # vocal boost
+        if rms_rank > 0.6:
+            scores[2] += 0.2                   # above-average energy bonus
+        if sf["length_s"] > 20:
+            scores[2] += 0.2  # long high-energy sections are chorus
+
+        # --- Bridge (3): rare cluster, moderate energy, transitional ---
+        scores[3] += sf["cluster_rarity"] * 0.8  # uncommon section
+        if 0.2 < rms_rank < 0.7:
+            scores[3] += 0.3  # moderate energy
+        if 0.3 < sf["pos"] < 0.8:
+            scores[3] += 0.2  # mid-song
+
+        # --- Breakdown (4): distinctly low energy, sparse ---
+        if rms_rank < 0.4:
+            scores[4] += (0.4 - rms_rank) * 2.0  # below-average energy
+            scores[4] += (1.0 - onset_rank) * 0.3  # sparse onsets help
+        if rms_rank < 0.25:
+            scores[4] += 0.4                       # truly quiet = strong signal
+        if sf["energy_slope"] < -0.03:
+            scores[4] += 0.3                       # energy falling into breakdown
+
+        # --- Buildup (5): energy rising + not at peak yet ---
+        if sf["energy_slope"] > 0.03:
+            scores[5] += min(sf["energy_slope"] * 6.0, 1.0)  # rising energy
+        if sf["onset_slope"] > 0.02:
+            scores[5] += min(sf["onset_slope"] * 4.0, 0.6)   # increasing onsets
+        if 0.3 < rms_rank < 0.75:
+            scores[5] += 0.2  # moderate (not yet at peak)
+        if sf["flux"] > 0.15:
+            scores[5] += 0.15  # spectral change = tension
+        # Penalty: buildups shouldn't be very long
+        if sf["length_s"] > 25:
+            scores[5] -= 0.3
+
+        # --- Drop (6): CONTRAST is key — sudden energy jump + bass ---
+        # Drop must follow a quieter section (strong positive contrast)
+        if sf["contrast_rms"] > 0.08:
+            scores[6] += min(sf["contrast_rms"] * 6.0, 1.5)  # primary signal
+        if bass_rank > 0.7 and sf["contrast_rms"] > 0.05:
+            scores[6] += 0.5                    # bass + contrast
+        if rms_rank > 0.7:
+            scores[6] += 0.3                    # loud helps but isn't enough alone
+        # Penalty: long steady sections aren't drops (drops are explosive, not sustained)
+        if sf["length_s"] > 30:
+            scores[6] -= 0.5
+        # EDM/Pop: drops are more common
+        if genre_id in (0, 6) and sf["contrast_rms"] > 0.05:
+            scores[6] += 0.2
+
+        # --- Outro (7): late position + below-average energy ---
+        if sf["pos"] > 0.8:
+            scores[7] += (sf["pos"] - 0.8) * 5.0  # closer to end = higher
+            scores[7] += (1.0 - rms_rank) * 0.5
+            if sf["energy_slope"] < 0:
+                scores[7] += 0.3  # energy falling
+            if sf["idx"] == n_sections - 1:
+                scores[7] += 0.5  # last section bonus
+
+        # --- Solo (8): bright + active + non-vocal ---
+        scores[8] += cent_rank * 0.5          # bright
+        scores[8] += onset_rank * 0.3         # active
+        if sf["vocal"] < 0.3:
+            scores[8] += 0.3                   # non-vocal
+        if sf["cluster_rarity"] > 0.5:
+            scores[8] += 0.2                   # uncommon
+
+        section_scores.append(scores)
+
+    # --- Pass 2: Pick best type per section ---
+    raw_types = []
+    for i, scores in enumerate(section_scores):
+        best = int(np.argmax(scores))
+        raw_types.append(best)
+
+    # --- Pass 3: Temporal refinement ---
+    # Rule: If a section scored as buildup is followed by a high-energy section,
+    # upgrade the follower to drop (if it's not already chorus/drop)
+    for i in range(len(raw_types) - 1):
+        if raw_types[i] == 5:  # buildup
+            next_rms_rank = _rank(sec_features[i + 1]["rms"], all_rms)
+            if next_rms_rank > 0.6 and raw_types[i + 1] not in (2, 6):
+                # The section after a buildup with high energy → drop
+                if sec_features[i + 1]["bass"] > bass_median:
+                    raw_types[i + 1] = 6  # drop
+                else:
+                    raw_types[i + 1] = 2  # chorus
+
+    # Rule: If drop/chorus is followed by a quiet section, mark it breakdown
+    for i in range(len(raw_types) - 1):
+        if raw_types[i] in (2, 6):  # chorus or drop
+            next_rms_rank = _rank(sec_features[i + 1]["rms"], all_rms)
+            if next_rms_rank < 0.35 and raw_types[i + 1] == 1:
+                raw_types[i + 1] = 4  # breakdown
+
+    # Rule: Prevent duplicate intro/outro (only one each, the best-scored)
+    for special_type in (0, 7):
+        indices = [i for i, t in enumerate(raw_types) if t == special_type]
+        if len(indices) > 1:
+            # Keep the one with the highest score
+            best_idx = max(indices, key=lambda i: section_scores[i][special_type])
+            for i in indices:
+                if i != best_idx:
+                    # Demote to verse
+                    raw_types[i] = 1
+
+    # --- Apply to frame array ---
+    for sec_idx in range(n_sections):
+        start = sec_features[sec_idx]["start"]
+        end = sec_features[sec_idx]["end"]
+        section_type[start:end] = raw_types[sec_idx]
+
+    # Boundary array
     boundary_arr = changes.astype(np.int32) if len(changes) > 0 else np.zeros(1, dtype=np.int32)
 
     return section_type, boundary_arr, n_boundaries
