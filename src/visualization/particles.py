@@ -66,8 +66,15 @@ class ParticleSystem:
         # Boost spawn on kick/snare impulses
         kick = features.get("kick_pulse", 0.0)
         snare = features.get("snare_pulse", 0.0)
+        vocal = features.get("vocal_presence", 0.0)
+        climax_score = features.get("climax_score", 0.0)
+        arousal = features.get("arousal", 0.5)
+        explosion = features.get("explosion_factor", 0.0)
+        valence = features.get("valence", 0.5)
         impulse = max(kick, snare)
         effective_rate = spawn_rate * 200.0  # base: up to 200 particles/sec
+        effective_rate *= (1.0 - vocal * 0.4)   # vocal dampens spawn
+        effective_rate += climax_score * 100.0   # climax boosts spawn
         if impulse > 0.3:
             effective_rate += impulse * 300.0  # burst on hits
 
@@ -79,8 +86,8 @@ class ParticleSystem:
         # Spawn particles on CPU
         if n_spawn > 0 and ball_radius > 1.0:
             n_spawn = min(n_spawn, 64)  # cap per frame
-            hue_base = features.get("spectral_centroid", 0.5) * 0.65
-            speed_base = (50.0 + particle_energy * 200.0) * max(1.0, ball_radius / 50.0)
+            hue_base = features.get("spectral_centroid", 0.5) * 0.85 + 0.05 + 0.35
+            speed_base = (50.0 + particle_energy * 200.0 + arousal * 50.0 + explosion * 100.0) * max(1.0, ball_radius / 50.0)
 
             for _ in range(n_spawn):
                 angle = self._rng.uniform(0, 2 * math.pi)
@@ -94,9 +101,9 @@ class ParticleSystem:
                 vx = math.cos(v_angle) * speed
                 vy = math.sin(v_angle) * speed
 
-                life = self._rng.uniform(0.3, 1.2)
+                life = self._rng.uniform(0.3, 1.2) + vocal * 0.3
                 brightness = self._rng.uniform(0.3, 0.8) * (0.5 + particle_energy)
-                hue = hue_base + self._rng.uniform(-0.1, 0.1)
+                hue = hue_base + self._rng.uniform(-0.1, 0.1) + (valence - 0.5) * 0.05
 
                 slot = self._next_slot
                 base = slot * 8
@@ -128,7 +135,7 @@ class ParticleSystem:
 
         # Update CPU-side life tracking (no GPU readback needed —
         # decrement life on CPU to keep spawn slot tracking in sync)
-        self._state_data[4::8] -= delta_time  # life field at offset 4 per particle
+        self._state_data[4::8] = np.maximum(self._state_data[4::8] - delta_time, 0.0)
 
     def cleanup(self):
         """Release GPU resources."""

@@ -53,6 +53,9 @@ void main() {
     vx *= drag_factor;
     vy *= drag_factor;
 
+    // Subtle downward gravity for natural arcing
+    vy += 120.0 * u_dt;
+
     // Decrement life
     life -= u_dt;
 

@@ -15,6 +15,7 @@ uniform float u_base_brightness; // Global brightness multiplier
 uniform float u_global_hue;      // From spectral centroid (0-1)
 uniform float u_depth_fog;       // 0-1 fog intensity
 uniform vec3 u_fog_color;        // Fog color (matches bloom tint)
+uniform float u_saturation;      // Director-driven saturation
 
 // HSV to RGB conversion
 vec3 hsv2rgb(float h, float s, float v) {
@@ -43,7 +44,7 @@ void main() {
     float hue = fract(u_global_hue + v_hue);
 
     // Saturation: foreground lines more saturated, flash boosts saturation
-    float sat = 0.85 + v_depth * 0.1 + u_flash * 0.05;
+    float sat = u_saturation + v_depth * 0.1 + u_flash * 0.05;
     vec3 base_color = hsv2rgb(hue, clamp(sat, 0.7, 1.0), 1.0);
 
     // Blend toward bright version of the same hue for the core (preserves color)

@@ -107,6 +107,10 @@ class EnergyBallGenerator:
         self._initialized = False
         self._rng = np.random.RandomState(42)
 
+        # Shake offset state for kick impacts
+        self._shake_offset_x = 0.0
+        self._shake_offset_y = 0.0
+
         # Load compute shader
         comp_path = os.path.join(SHADER_DIR, "spline.comp")
         with open(comp_path, "r") as f:
@@ -117,7 +121,6 @@ class EnergyBallGenerator:
         self._loop_ssbo: moderngl.Buffer | None = None
         self._segment_ssbo: moderngl.Buffer | None = None
         self._current_loop_count = 0
-        self._hihat_dirty = False
 
     def _ensure_loops(self, count: int):
         """Create or adjust the number of persistent loops with band assignment."""
@@ -129,13 +132,13 @@ class EnergyBallGenerator:
         for i in range(count):
             if i < third:
                 band = 0       # bass
-                hue_off = -0.1
+                hue_off = -0.15  # shift toward warm red
             elif i < 2 * third:
                 band = 1       # mid
                 hue_off = 0.0
             else:
                 band = 2       # treble
-                hue_off = 0.15
+                hue_off = 0.20   # shift toward cool blue
             self._loops.append(Loop(24, self._rng, band_index=band, hue_offset=hue_off))
 
         # Pack and upload loop data to SSBO
@@ -152,6 +155,9 @@ class EnergyBallGenerator:
 
         self._current_loop_count = count
         self._initialized = True
+
+        # Store base noise phases for decay-back (hihat jitter fix)
+        self._base_noise_phases = [loop.noise_phase.copy() for loop in self._loops]
 
     def _update_loop_ssbo_noise(self):
         """Re-upload loop data when noise phases are mutated (hihat jitter)."""
@@ -204,6 +210,11 @@ class EnergyBallGenerator:
         snare = features.get("snare_pulse", 0.0)
         hihat = features.get("hihat_pulse", 0.0)
 
+        tempo = features.get("tempo", 120.0)
+        groove = features.get("groove_factor", 0.0)
+        rhythmic_density = features.get("rhythmic_density", 0.0)
+        arousal = features.get("arousal", 0.5)
+
         energy_mult = settings.get("energy_mult", 1.0)
         noise_mult = settings.get("noise_mult", 1.0)
         rotation_speed = settings.get("rotation_speed", 1.0)
@@ -213,7 +224,7 @@ class EnergyBallGenerator:
         # --- A. Spring-damped radius ---
         zoom = settings.get("zoom", 1.0)
         quiet_radius = half_min * 0.08 * zoom
-        loud_radius = half_min * 0.35 * zoom
+        loud_radius = half_min * (0.28 + arousal * 0.14) * zoom
 
         target = quiet_radius + (loud_radius - quiet_radius) * (bass ** 0.7) * energy_mult
         target *= (1.0 - anticipation * 0.25)
@@ -228,17 +239,30 @@ class EnergyBallGenerator:
         kick_impulse = max(0.0, kick - self._prev_beat)
         if kick_impulse > 0.3:
             self._current_radius += kick_impulse * self._current_radius * 0.15
+            # Add shake offset on kick impact
+            shake_amount = self._current_radius * 0.06
+            self._shake_offset_x += self._rng.uniform(-shake_amount, shake_amount)
+            self._shake_offset_y += self._rng.uniform(-shake_amount, shake_amount)
         self._prev_beat = kick
+
+        # Decay shake offset (fast falloff ~80ms)
+        shake_decay = math.exp(-12.0 * dt)
+        self._shake_offset_x *= shake_decay
+        self._shake_offset_y *= shake_decay
 
         self._current_radius = min(self._current_radius, max_radius)
         radius = max(5.0, self._current_radius)
 
         # --- B. Noise parameters ---
-        noise_intensity = (0.05 + mid * 0.2 + bandwidth * 0.15 + explosion * 0.4) * noise_mult
-        noise_speed = 3.0 + spectral_flux * 8.0 + anticipation * 5.0
+        noise_intensity = (0.05 + mid * 0.2 + bandwidth * 0.15 + explosion * 0.4 + rhythmic_density * 0.1) * noise_mult
+        noise_speed = 3.0 * (tempo / 120.0) + spectral_flux * 8.0 + anticipation * 5.0
 
-        # --- C. Rotation ---
-        self._rotation_angle += dt * (0.3 + anticipation * 0.8 + rms * 0.2) * rotation_speed
+        # --- C. Rotation (beat-synchronized pulse) ---
+        rotation_speed *= settings.get("director_rotation_tempo", 1.0)
+        beat_sync = 1.0 + kick * 0.3 + snare * 0.15
+        rot_increment = dt * (0.3 + anticipation * 0.8 + rms * 0.2) * rotation_speed * beat_sync
+        rot_increment += math.sin(time * tempo / 60.0 * math.pi) * groove * rotation_speed * 0.15 * dt
+        self._rotation_angle += rot_increment
 
         # --- D. Volume scatter ---
         radius_ratio = (radius - quiet_radius) / max(1.0, loud_radius - quiet_radius)
@@ -247,19 +271,33 @@ class EnergyBallGenerator:
 
         angular_boost = 1.0 + volume_scatter * 1.5
 
-        # --- E. Hihat jitter (CPU-side noise phase mutation) ---
+        # --- E. Hihat jitter (CPU-side noise phase mutation with decay) ---
         if hihat > 0.5:
             for loop in self._loops:
                 loop.noise_phase += self._rng.uniform(-0.5, 0.5, loop.noise_phase.shape).astype(np.float32)
+
+        # Decay noise phases back toward base values (prevents unbounded drift)
+        decay_factor = 1.0 - math.exp(-3.0 * dt)
+        for i, loop in enumerate(self._loops):
+            loop.noise_phase += (self._base_noise_phases[i] - loop.noise_phase) * decay_factor
+
+        # Check if any noise phase has drifted from base (avoid unnecessary uploads)
+        needs_upload = hihat > 0.5
+        if not needs_upload:
+            for i, loop in enumerate(self._loops):
+                if np.max(np.abs(loop.noise_phase - self._base_noise_phases[i])) > 0.01:
+                    needs_upload = True
+                    break
+        if needs_upload:
             self._update_loop_ssbo_noise()
 
         # --- F. Dynamic loop count ---
-        active = max(3, int(rms * energy_mult * loop_count))
+        active = max(3, int(rms * energy_mult * loop_count) + int(rhythmic_density * 3))
 
         # --- G. Dispatch compute shader ---
         self._compute["u_time"] = time
         self._compute["u_radius"] = radius
-        self._compute["u_center"] = (cx, cy)
+        self._compute["u_center"] = (cx + self._shake_offset_x, cy + self._shake_offset_y)
         self._compute["u_rotation_angle"] = self._rotation_angle
         self._compute["u_perspective_d"] = 3.0
         self._compute["u_noise_intensity"] = noise_intensity
@@ -288,7 +326,9 @@ class EnergyBallGenerator:
         # --- H. Waveform ring (CPU, appended separately) ---
         ring_segs = None
         if settings.get("show_ring", True):
-            ring_segs = self._generate_ring(cx, cy, radius, features, settings)
+            ring_segs = self._generate_ring(
+                cx + self._shake_offset_x, cy + self._shake_offset_y,
+                radius, features, settings)
 
         return self._segment_ssbo, compute_seg_count, ring_segs
 
@@ -324,7 +364,8 @@ class EnergyBallGenerator:
         segs[:, 3] = y[1:]
         segs[:, 4] = 3.0
         segs[:, 5] = np.clip(mel_frame * 3.0, 0.0, 1.0) * ring_opacity
-        segs[:, 6] = np.linspace(0.05, 0.6, n_bins).astype(np.float32)
+        global_hue = settings.get("global_hue", 0.3)
+        segs[:, 6] = global_hue + np.linspace(-0.15, 0.15, n_bins).astype(np.float32)
         segs[:, 7] = 0.5
 
         return segs

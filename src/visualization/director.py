@@ -32,6 +32,8 @@ class _DirectorState:
         "depth_fog_offset", "hue_shift", "loop_count_offset",
         "trail_decay", "particle_spawn_rate", "particle_energy",
         "prev_section_type", "section_transition_t",
+        "saturation_offset", "vignette_offset", "chromatic_offset",
+        "bg_intensity_offset", "color_temp_shift", "rotation_tempo_scale",
     )
 
     def __init__(self):
@@ -52,6 +54,12 @@ class _DirectorState:
         self.particle_energy = 0.0
         self.prev_section_type = -1
         self.section_transition_t = 0.0
+        self.saturation_offset = 0.0
+        self.vignette_offset = 0.0
+        self.chromatic_offset = 0.0
+        self.bg_intensity_offset = 0.0
+        self.color_temp_shift = 0.0
+        self.rotation_tempo_scale = 1.0
 
 
 class _GenreProfile:
@@ -270,12 +278,19 @@ class MusicalDirector:
         """Compute raw target multipliers from musical context."""
         section_type = features.get("section_type", 1)
         climax = features.get("climax_score", 0.0)
+        climax_type = features.get("climax_type", 0)
         arousal = features.get("arousal", 0.5)
         valence = features.get("valence", 0.5)
         vocal = features.get("vocal_presence", 0.0)
         la_energy = features.get("lookahead_energy_delta", 0.0)
         la_section = features.get("lookahead_section_change", 0.0)
         la_climax = features.get("lookahead_climax", 0.0)
+        tempo = features.get("tempo", 120.0)
+        groove = features.get("groove_factor", 0.0)
+        energy_traj = features.get("energy_trajectory", 0.0)
+        rhythmic_density = features.get("rhythmic_density", 0.0)
+        explosion = features.get("explosion_factor", 0.0)
+        bass = features.get("bass_energy", 0.0)
 
         section_transitions = settings.get("section_transitions", True)
         climax_reactions = settings.get("climax_reactions", True)
@@ -295,26 +310,101 @@ class MusicalDirector:
         trail = sv["trail"] if section_transitions else 0.0
         particle = sv["particle"] if section_transitions else 0.0
 
-        # Climax boost
+        # New output targets
+        saturation_offset = 0.0
+        vignette_offset = 0.0
+        chromatic_offset = 0.0
+        bg_intensity_offset = 0.0
+        color_temp_shift = 0.0
+
+        # Tempo → rotation scaling (normalized around 120 BPM)
+        rotation_tempo_scale = tempo / 120.0
+
+        # Valence → saturation (happy=vivid, sad=muted)
+        saturation_offset = (valence - 0.5) * 0.2
+
+        # Valence → color temperature (happy=warm, sad=cool)
+        color_temp_shift = (valence - 0.5) * 0.15
+
+        # Valence → fog (sad = more fog, halved to avoid stacking with section fog)
+        fog_offset += (1.0 - valence) * 0.05
+
+        # Arousal → vignette (excited=tighter, calm=opener)
+        vignette_offset = arousal * 0.15 - 0.05
+
+        # Arousal → background (calm=more visible background)
+        bg_intensity_offset = (1.0 - arousal) * 0.03
+
+        # Energy trajectory → trails (falling energy = ghostly trails)
+        if energy_traj < -0.2:
+            trail += abs(energy_traj) * 0.3
+
+        # Rhythmic density → active loops and noise
+        loop_offset += int(rhythmic_density * 3)
+        noise *= (1.0 + rhythmic_density * 0.2)
+
+        # Vocal presence → trail boost (vocals = smoother/dreamier)
+        trail += vocal * 0.15
+
+        # Explosion + bass → chromatic aberration
+        chromatic_offset += explosion * 0.005 + max(0.0, bass - 0.3) * 0.003
+
+        # Climax boost (general)
         if climax_reactions and climax > 0.3:
             climax_factor = (climax - 0.3) / 0.7 * profile.climax_intensity
             brightness += climax_factor * 0.3
             bloom += climax_factor * 0.5
             anamorphic += climax_factor * 0.3
             particle += climax_factor * 0.3
+            saturation_offset += climax_factor * 0.05
 
-        # Look-ahead preparation
+            # Climax type → distinct visual signatures
+            if climax_type == 1:  # drop
+                bloom *= 1.5
+                anamorphic *= 1.5
+                particle += 0.5
+                noise *= 1.3
+                fog_offset -= 0.15
+                vignette_offset -= 0.2  # opens wide
+                chromatic_offset += 0.003
+            elif climax_type == 2:  # chorus_peak
+                bloom *= 1.3
+                brightness *= 1.2
+                saturation_offset += 0.1
+                color_temp_shift += 0.1  # warm bloom surge
+            elif climax_type == 4:  # solo_peak
+                brightness *= 1.3
+                noise *= 0.6
+                fog_offset -= 0.1
+                loop_offset -= 3  # tight focus
+            elif climax_type == 5:  # breakdown_return
+                bloom *= 1.4
+                particle += 0.4
+                trail = 0.0  # snap back
+                chromatic_offset += 0.002
+
+        # Look-ahead preparation (enhanced)
         if settings.get("beat_sync", True):
-            # Before climax: slight tension buildup
+            # Before climax: tension buildup + vignette tightening + bloom pre-glow
             if la_climax > 0.3:
                 tension = (la_climax - 0.3) / 0.7
                 energy *= (1.0 - tension * 0.1)  # slight contraction
                 noise *= (1.0 + tension * 0.3)    # anxiety
                 rotation *= (1.0 + tension * 0.2)
+                vignette_offset += tension * 0.2   # tightening
+                bloom *= (1.0 + tension * 0.2)     # pre-glow
 
-            # Before section change: subtle fog "inhale"
+            # Before section change: subtle fog "inhale" + brightness breath
             if la_section > 0.3:
                 fog_offset += la_section * 0.1
+            if la_section > 0.5:
+                brightness *= (1.0 - la_section * 0.05)  # brief breath
+
+            # Energy delta lookahead
+            if la_energy > 0:
+                brightness *= (1.0 + la_energy * 0.05)   # pre-brighten
+            elif la_energy < 0:
+                trail += abs(la_energy) * 0.15            # pre-trail
 
         # Arousal-driven rotation
         rotation *= (0.7 + arousal * 0.6)
@@ -352,6 +442,12 @@ class MusicalDirector:
             "trail": trail,
             "particle": particle,
             "particle_energy": arousal * profile.beat_reactivity,
+            "saturation_offset": saturation_offset,
+            "vignette_offset": vignette_offset,
+            "chromatic_offset": chromatic_offset,
+            "bg_intensity_offset": bg_intensity_offset,
+            "color_temp_shift": color_temp_shift,
+            "rotation_tempo_scale": rotation_tempo_scale,
         }
 
     def _smooth_state(self, targets: dict, dt: float):
@@ -369,6 +465,12 @@ class MusicalDirector:
         s.trail_decay = _exp_smooth(s.trail_decay, targets["trail"], _TAU_MEDIUM, dt)
         s.particle_spawn_rate = _exp_smooth(s.particle_spawn_rate, targets["particle"], _TAU_FAST, dt)
         s.particle_energy = _exp_smooth(s.particle_energy, targets["particle_energy"], _TAU_FAST, dt)
+        s.saturation_offset = _exp_smooth(s.saturation_offset, targets["saturation_offset"], _TAU_SLOW, dt)
+        s.vignette_offset = _exp_smooth(s.vignette_offset, targets["vignette_offset"], _TAU_MEDIUM, dt)
+        s.chromatic_offset = _exp_smooth(s.chromatic_offset, targets["chromatic_offset"], _TAU_FAST, dt)
+        s.bg_intensity_offset = _exp_smooth(s.bg_intensity_offset, targets["bg_intensity_offset"], _TAU_SLOW, dt)
+        s.color_temp_shift = _exp_smooth(s.color_temp_shift, targets["color_temp_shift"], _TAU_SLOW, dt)
+        s.rotation_tempo_scale = _exp_smooth(s.rotation_tempo_scale, targets["rotation_tempo_scale"], _TAU_SLOW, dt)
 
     def _apply_to_settings(self, base: dict, intensity: float, features: dict,
                            profile: _GenreProfile) -> dict:
@@ -399,6 +501,14 @@ class MusicalDirector:
 
         # Hue shift (applied in render)
         result["director_hue_shift"] = s.hue_shift * intensity
+
+        # New dynamic outputs
+        result["director_saturation"] = s.saturation_offset * intensity
+        result["director_vignette"] = s.vignette_offset * intensity
+        result["director_chromatic"] = s.chromatic_offset * intensity
+        result["director_bg_boost"] = s.bg_intensity_offset * intensity
+        result["director_color_temp"] = s.color_temp_shift * intensity
+        result["director_rotation_tempo"] = 1.0 + (s.rotation_tempo_scale - 1.0) * intensity
 
         # Status info for UI overlay
         genre_id = features.get("genre_id", 6)

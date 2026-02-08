@@ -2,7 +2,6 @@
 
 import multiprocessing
 import os
-import sys
 import time
 import threading
 from enum import Enum, auto
@@ -463,17 +462,29 @@ class App:
         directed_settings = self.director.process(features, settings, delta_time)
         self._last_directed_settings = directed_settings
 
+        # Compute global hue early so ball_gen can use it for ring coloring
+        global_hue = features.get("spectral_centroid", 0.5) * 0.85 + 0.05
+        global_hue += features.get("key_index", 0) / 12.0 * 0.08  # subtle personality per key
+        directed_settings["global_hue"] = global_hue
+
         seg_buffer, compute_count, ring_segs = self.ball_gen.generate(
             self.width, self.height, now - self._start_time, delta_time, features, directed_settings
         )
 
         # Add flash and global hue from features to render settings
         render_settings = dict(directed_settings)
-        render_settings["flash"] = features.get("onset_strength", 0.0)
-        render_settings["global_hue"] = features.get("spectral_centroid", 0.5) * 0.65
+        raw_onset = features.get("onset_strength", 0.0)
+        sharpness = features.get("onset_sharpness", 0.5)
+        render_settings["flash"] = max(0.0, raw_onset - 0.35) / 0.65 * sharpness
+        render_settings["global_hue"] = global_hue
+        render_settings["arousal"] = features.get("arousal", 0.2)
+        render_settings["valence"] = features.get("valence", 0.5)
+        render_settings["rms"] = features.get("rms", 0.0)
+        render_settings["time"] = now - self._start_time
 
-        # Update particles
-        ball_cx, ball_cy = self.width / 2, self.height / 2
+        # Update particles (use shaken center so particles emit from visual position)
+        ball_cx = self.width / 2 + self.ball_gen._shake_offset_x
+        ball_cy = self.height / 2 + self.ball_gen._shake_offset_y
         ball_radius = self.ball_gen._current_radius
         self.particles.update(delta_time, features, directed_settings,
                               ball_cx, ball_cy, ball_radius)

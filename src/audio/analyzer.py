@@ -441,7 +441,25 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
         geo = np.exp(np.mean(np.log(vocal_band + 1e-8), axis=0))
         arith = np.mean(vocal_band, axis=0)
         flatness = geo / (arith + 1e-8)
-        vocal_presence = 1.0 - _normalize(flatness)
+
+        # Harmonic ratio component
+        harmonic_ratio = 1.0 - _normalize(flatness)
+
+        # Spectral flatness: vocals have lower flatness than instruments
+        full_geo = np.exp(np.mean(np.log(S + 1e-8), axis=0))
+        full_arith = np.mean(S, axis=0)
+        full_flatness = full_geo / (full_arith + 1e-8)
+        flatness_component = 1.0 - _normalize(full_flatness)
+
+        # Formant band energy dominance (300-3000Hz ~ mel bins ~8-55)
+        formant_energy = np.mean(S[8:55, :], axis=0)
+        total_energy = np.mean(S, axis=0) + 1e-8
+        formant_dominance = _normalize(formant_energy / total_energy)
+
+        # Weighted combination
+        vocal_presence = (0.4 * harmonic_ratio +
+                         0.3 * flatness_component +
+                         0.3 * formant_dominance)
         vocal_presence = _local_normalize(vocal_presence, window_s, fps)
 
     report(0.70)
@@ -949,8 +967,24 @@ def _label_sections(
         end = sec_features[sec_idx]["end"]
         section_type[start:end] = raw_types[sec_idx]
 
-    # Boundary array
-    boundary_arr = changes.astype(np.int32) if len(changes) > 0 else np.zeros(1, dtype=np.int32)
+    # --- Merge short sections (< 2 seconds) into neighbors ---
+    min_section_frames = int(2.0 * fps)
+    for sec_idx in range(n_sections):
+        start = sec_features[sec_idx]["start"]
+        end = sec_features[sec_idx]["end"]
+        if (end - start) < min_section_frames:
+            # Find neighbor with longer span
+            prev_len = (start - sec_features[sec_idx - 1]["start"]) if sec_idx > 0 else 0
+            next_len = (sec_features[sec_idx + 1]["end"] - end) if sec_idx + 1 < n_sections else 0
+            if prev_len >= next_len and sec_idx > 0:
+                section_type[start:end] = section_type[max(0, start - 1)]
+            elif sec_idx + 1 < n_sections:
+                section_type[start:end] = section_type[min(n_frames - 1, end)]
+
+    # Recompute boundaries after merging
+    changes_new = np.where(np.diff(section_type) != 0)[0] + 1
+    boundary_arr = changes_new.astype(np.int32) if len(changes_new) > 0 else np.zeros(1, dtype=np.int32)
+    n_boundaries = len(changes_new)
 
     return section_type, boundary_arr, n_boundaries
 

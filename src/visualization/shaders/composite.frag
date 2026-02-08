@@ -11,6 +11,8 @@ uniform sampler2D u_anamorphic;    // horizontal streak
 uniform float u_bloom_intensity;
 uniform float u_anamorphic_intensity;
 uniform vec3 u_bloom_tint;
+uniform float u_vignette;        // Dynamic vignette strength
+uniform float u_chromatic;       // Dynamic chromatic aberration offset
 
 void main() {
     vec3 scene = texture(u_scene, v_uv).rgb;
@@ -19,6 +21,14 @@ void main() {
     vec3 bloom = texture(u_bloom_0, v_uv).rgb * 0.4
                + texture(u_bloom_1, v_uv).rgb * 0.35
                + texture(u_bloom_2, v_uv).rgb * 0.25;
+
+    // Subtle chromatic aberration on bloom (RGB fringe)
+    float aberration = u_bloom_intensity * 0.001 + u_chromatic;
+    vec3 bloom_r = texture(u_bloom_0, v_uv + vec2(aberration, 0.0)).rgb;
+    vec3 bloom_b = texture(u_bloom_0, v_uv - vec2(aberration, 0.0)).rgb;
+    bloom.r = mix(bloom.r, bloom_r.r, 0.3);
+    bloom.b = mix(bloom.b, bloom_b.b, 0.3);
+
     vec3 flare = texture(u_anamorphic, v_uv).rgb;
 
     // Color-preserving tint: lerp toward tint color instead of multiplying
@@ -46,7 +56,7 @@ void main() {
 
     // Vignette: stronger to frame the center
     vec2 q = v_uv - 0.5;
-    color *= 1.0 - dot(q, q) * 0.7;
+    color *= 1.0 - dot(q, q) * u_vignette;
 
     frag_color = vec4(color, 1.0);
 }

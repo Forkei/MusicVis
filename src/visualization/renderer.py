@@ -30,6 +30,14 @@ class Renderer:
         # Ring-only instance buffer (for CPU-generated waveform ring)
         self._ring_buffer = self.ctx.buffer(reserve=1024 * 8 * 4)
 
+        # Cached VAOs for per-frame rendering (avoid recreating each frame)
+        self._ball_vao = None
+        self._ball_vao_buf_id = None
+        self._ring_vao = None
+        self._ring_vao_buf_id = None
+        self._particle_vao = None
+        self._particle_vao_buf_id = None
+
     def _build_shaders(self):
         # Line rendering program
         self.line_prog = self.ctx.program(
@@ -53,6 +61,12 @@ class Renderer:
         self.trail_prog = self.ctx.program(
             vertex_shader=_load_shader("blur.vert"),
             fragment_shader=_load_shader("trail.frag"),
+        )
+
+        # Background nebula program
+        self.bg_prog = self.ctx.program(
+            vertex_shader=_load_shader("blur.vert"),
+            fragment_shader=_load_shader("background.frag"),
         )
 
     def _build_framebuffers(self, w: int, h: int):
@@ -118,6 +132,9 @@ class Renderer:
         self._trail_vao = self.ctx.vertex_array(
             self.trail_prog, [(self._fsq_vbo, "2f", "in_position")]
         )
+        self._bg_vao = self.ctx.vertex_array(
+            self.bg_prog, [(self._fsq_vbo, "2f", "in_position")]
+        )
 
     def resize(self, width: int, height: int):
         """Resize framebuffers on window resize."""
@@ -150,7 +167,22 @@ class Renderer:
         self.scene_fbo.use()
         self.ctx.clear(0.0, 0.0, 0.0, 1.0)
 
+        # Render animated background nebula
+        arousal = settings.get("arousal", 0.2)
+        bg_time = settings.get("time", 0.0)
         bloom_tint = settings.get("bloom_tint", (0.3, 0.6, 1.0))
+
+        self.bg_prog["u_time"].value = bg_time
+        self.bg_prog["u_arousal"].value = arousal
+        self.bg_prog["u_bloom_tint"].value = bloom_tint
+        self.bg_prog["u_resolution"].value = (float(self.width), float(self.height))
+        self.bg_prog["u_bg_boost"].value = settings.get("director_bg_boost", 0.0)
+        self.bg_prog["u_valence"].value = settings.get("valence", 0.5)
+        self.bg_prog["u_rms"].value = settings.get("rms", 0.0)
+        self.ctx.enable(moderngl.BLEND)
+        self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE
+        self._bg_vao.render(moderngl.TRIANGLES)
+        self.ctx.disable(moderngl.BLEND)
         depth_fog = settings.get("depth_fog", 0.4)
 
         # Apply director hue shift to global hue
@@ -163,25 +195,30 @@ class Renderer:
         self.line_prog["u_global_hue"].value = global_hue
         self.line_prog["u_depth_fog"].value = depth_fog
         self.line_prog["u_fog_color"].value = bloom_tint
+        self.line_prog["u_saturation"].value = 0.85 + settings.get("director_saturation", 0.0)
 
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE
 
-        # Render compute-generated segments from SSBO
+        # Render compute-generated segments from SSBO (cached VAO)
         if compute_count > 0 and segment_buffer is not None:
-            vao = self.ctx.vertex_array(
-                self.line_prog,
-                [
-                    (self._quad_vbo, "2f", "in_position"),
-                    (segment_buffer, "2f 2f 1f 1f 1f 1f /i",
-                     "in_p0", "in_p1", "in_thickness", "in_brightness",
-                     "in_hue", "in_depth"),
-                ],
-            )
-            vao.render(moderngl.TRIANGLES, instances=compute_count)
-            vao.release()
+            buf_id = id(segment_buffer)
+            if self._ball_vao is None or self._ball_vao_buf_id != buf_id:
+                if self._ball_vao is not None:
+                    self._ball_vao.release()
+                self._ball_vao = self.ctx.vertex_array(
+                    self.line_prog,
+                    [
+                        (self._quad_vbo, "2f", "in_position"),
+                        (segment_buffer, "2f 2f 1f 1f 1f 1f /i",
+                         "in_p0", "in_p1", "in_thickness", "in_brightness",
+                         "in_hue", "in_depth"),
+                    ],
+                )
+                self._ball_vao_buf_id = buf_id
+            self._ball_vao.render(moderngl.TRIANGLES, instances=compute_count)
 
-        # Render ring segments (CPU-generated)
+        # Render ring segments (CPU-generated, cached VAO)
         if ring_segments is not None and len(ring_segments) > 0:
             n_ring = len(ring_segments)
             data = ring_segments.astype("f4").tobytes()
@@ -189,34 +226,44 @@ class Renderer:
             if self._ring_buffer.size < needed:
                 self._ring_buffer.release()
                 self._ring_buffer = self.ctx.buffer(reserve=needed)
+                self._ring_vao = None  # force rebuild
+                self._ring_vao_buf_id = None
             self._ring_buffer.orphan(needed)
             self._ring_buffer.write(data)
 
-            ring_vao = self.ctx.vertex_array(
-                self.line_prog,
-                [
-                    (self._quad_vbo, "2f", "in_position"),
-                    (self._ring_buffer, "2f 2f 1f 1f 1f 1f /i",
-                     "in_p0", "in_p1", "in_thickness", "in_brightness",
-                     "in_hue", "in_depth"),
-                ],
-            )
-            ring_vao.render(moderngl.TRIANGLES, instances=n_ring)
-            ring_vao.release()
+            buf_id = id(self._ring_buffer)
+            if self._ring_vao is None or self._ring_vao_buf_id != buf_id:
+                if self._ring_vao is not None:
+                    self._ring_vao.release()
+                self._ring_vao = self.ctx.vertex_array(
+                    self.line_prog,
+                    [
+                        (self._quad_vbo, "2f", "in_position"),
+                        (self._ring_buffer, "2f 2f 1f 1f 1f 1f /i",
+                         "in_p0", "in_p1", "in_thickness", "in_brightness",
+                         "in_hue", "in_depth"),
+                    ],
+                )
+                self._ring_vao_buf_id = buf_id
+            self._ring_vao.render(moderngl.TRIANGLES, instances=n_ring)
 
-        # Render particle segments
+        # Render particle segments (cached VAO)
         if particle_count > 0 and particle_buffer is not None:
-            p_vao = self.ctx.vertex_array(
-                self.line_prog,
-                [
-                    (self._quad_vbo, "2f", "in_position"),
-                    (particle_buffer, "2f 2f 1f 1f 1f 1f /i",
-                     "in_p0", "in_p1", "in_thickness", "in_brightness",
-                     "in_hue", "in_depth"),
-                ],
-            )
-            p_vao.render(moderngl.TRIANGLES, instances=particle_count)
-            p_vao.release()
+            buf_id = id(particle_buffer)
+            if self._particle_vao is None or self._particle_vao_buf_id != buf_id:
+                if self._particle_vao is not None:
+                    self._particle_vao.release()
+                self._particle_vao = self.ctx.vertex_array(
+                    self.line_prog,
+                    [
+                        (self._quad_vbo, "2f", "in_position"),
+                        (particle_buffer, "2f 2f 1f 1f 1f 1f /i",
+                         "in_p0", "in_p1", "in_thickness", "in_brightness",
+                         "in_hue", "in_depth"),
+                    ],
+                )
+                self._particle_vao_buf_id = buf_id
+            self._particle_vao.render(moderngl.TRIANGLES, instances=particle_count)
 
         self.ctx.disable(moderngl.BLEND)
 
@@ -297,6 +344,15 @@ class Renderer:
         self.composite_prog["u_anamorphic"].value = 4
         self.composite_prog["u_bloom_intensity"].value = bloom_intensity
         self.composite_prog["u_anamorphic_intensity"].value = anamorphic_intensity
+        self.composite_prog["u_vignette"].value = 0.7 + settings.get("director_vignette", 0.0)
+        self.composite_prog["u_chromatic"].value = settings.get("director_chromatic", 0.0)
+
+        # Apply color temperature shift to bloom tint
+        color_temp = settings.get("director_color_temp", 0.0)
+        bt = list(bloom_tint)
+        bt[0] = min(1.0, bt[0] + color_temp)                   # R — warm boost
+        bt[2] = min(1.0, max(0.0, bt[2] - color_temp))         # B — cool boost
+        bloom_tint = tuple(bt)
         self.composite_prog["u_bloom_tint"].value = bloom_tint
 
         self._composite_vao.render(moderngl.TRIANGLES)
@@ -357,6 +413,7 @@ class Renderer:
         self.trail_prog["u_prev_trail"].value = 0
         self.trail_prog["u_current_scene"].value = 1
         self.trail_prog["u_decay"].value = trail_decay
+        self.trail_prog["u_dt"].value = delta_time
         self._trail_vao.render(moderngl.TRIANGLES)
 
         # Use trail result as the scene texture for bloom/composite
@@ -371,12 +428,16 @@ class Renderer:
         objs = [
             self.scene_tex, self.bright_tex, self.scene_fbo,
             self._quad_vbo, self._fsq_vbo, self._ring_buffer,
-            self._blur_vao, self._composite_vao, self._trail_vao,
+            self._blur_vao, self._composite_vao, self._trail_vao, self._bg_vao,
             self.anamorphic_texA, self.anamorphic_texB,
             self.anamorphic_fboA, self.anamorphic_fboB,
             self.trail_texA, self.trail_texB,
             self.trail_fboA, self.trail_fboB,
         ]
+        # Cached VAOs
+        for vao in [self._ball_vao, self._ring_vao, self._particle_vao]:
+            if vao is not None:
+                objs.append(vao)
         for texA, texB, fboA, fboB, _, _ in self.bloom_scales:
             objs.extend([texA, texB, fboA, fboB])
         for obj in objs:
