@@ -254,8 +254,10 @@ class EnergyBallGenerator:
         radius = max(5.0, self._current_radius)
 
         # --- B. Noise parameters ---
-        noise_intensity = (0.05 + mid * 0.2 + bandwidth * 0.15 + explosion * 0.4 + rhythmic_density * 0.1) * noise_mult
-        noise_speed = 3.0 * (tempo / 120.0) + spectral_flux * 8.0 + anticipation * 5.0
+        # Power curve: lines stay coherent at low/mid energy, chaos only at peaks.
+        raw_noise = mid * 0.15 + bandwidth * 0.12 + explosion * 0.3 + rhythmic_density * 0.1
+        noise_intensity = (raw_noise ** 3.0) * noise_mult
+        noise_speed = min(8.0, 2.0 * (tempo / 120.0) + spectral_flux * 2.5 + anticipation * 2.0)
 
         # --- C. Rotation (beat-synchronized pulse) ---
         rotation_speed *= settings.get("director_rotation_tempo", 1.0)
@@ -269,12 +271,14 @@ class EnergyBallGenerator:
         radius_ratio = max(0.0, min(1.0, radius_ratio))
         volume_scatter = radius_ratio ** 2.0
 
-        angular_boost = 1.0 + volume_scatter * 1.5
+        angular_boost = 1.0 + volume_scatter * 0.3
 
         # --- E. Hihat jitter (CPU-side noise phase mutation with decay) ---
-        if hihat > 0.5:
+        # Only inject jitter when energy is also high — avoids texture during calm hihats
+        if hihat > 0.5 and rms > 0.6:
+            jitter_amp = 0.15 * min(1.0, (rms - 0.6) * 2.5)
             for loop in self._loops:
-                loop.noise_phase += self._rng.uniform(-0.5, 0.5, loop.noise_phase.shape).astype(np.float32)
+                loop.noise_phase += self._rng.uniform(-jitter_amp, jitter_amp, loop.noise_phase.shape).astype(np.float32)
 
         # Decay noise phases back toward base values (prevents unbounded drift)
         decay_factor = 1.0 - math.exp(-3.0 * dt)
