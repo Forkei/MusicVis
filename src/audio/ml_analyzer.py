@@ -132,9 +132,11 @@ class ModelManager:
         import onnxruntime as ort
 
         local_path = self._download(model_name)
+        available = ort.get_available_providers()
+        providers = [p for p in ["CUDAExecutionProvider", "CPUExecutionProvider"] if p in available]
         sess = ort.InferenceSession(
             local_path,
-            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            providers=providers,
         )
         self._sessions[model_name] = sess
         logger.info("[ML] Loaded ONNX session: %s", model_name)
@@ -717,6 +719,7 @@ def ml_analyze_structure(
             model="harmonix-all",
             include_activations=False,
             include_embeddings=False,
+            multiprocess=False,
         )
 
         segments = result.segments
