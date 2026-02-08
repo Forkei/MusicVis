@@ -411,8 +411,9 @@ class App:
         if actions["seek"] is not None:
             self.player.seek(actions["seek"])
 
-        # Settings
-        self.settings_panel.draw()
+        # Settings (pass auto values from director for auto-mode display)
+        auto_values = self._last_directed_settings.get("_auto_values")
+        self.settings_panel.draw(auto_values=auto_values)
 
         # Director status overlay
         if self.settings_panel.settings.get("director_enabled", True):
