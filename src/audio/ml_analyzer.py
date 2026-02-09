@@ -12,6 +12,7 @@ Dependencies (install via requirements-ml.txt):
 
 import os
 import logging
+import time
 
 import numpy as np
 
@@ -134,12 +135,16 @@ class ModelManager:
         local_path = self._download(model_name)
         available = ort.get_available_providers()
         providers = [p for p in ["CUDAExecutionProvider", "CPUExecutionProvider"] if p in available]
+        logger.info("[ML] Loading ONNX model '%s' with providers %s ...", model_name, providers)
+        t0 = time.perf_counter()
         sess = ort.InferenceSession(
             local_path,
             providers=providers,
         )
+        dt = time.perf_counter() - t0
+        logger.info("[ML] Loaded ONNX session '%s' in %.1fs (active provider: %s)",
+                     model_name, dt, sess.get_providers()[0])
         self._sessions[model_name] = sess
-        logger.info("[ML] Loaded ONNX session: %s", model_name)
         return sess
 
 
@@ -250,9 +255,16 @@ _embedding_cache: dict[str, np.ndarray] = {}
 def _get_embeddings_cached(audio_path: str) -> np.ndarray:
     """Get effnet embeddings, using cache if available for this file."""
     if audio_path in _embedding_cache:
+        logger.info("[ML] Using cached effnet embeddings (%d patches)", _embedding_cache[audio_path].shape[0])
         return _embedding_cache[audio_path]
+    logger.info("[ML] Resampling audio to 16kHz for effnet ...")
+    t0 = time.perf_counter()
     y_16k = _load_audio_16k(audio_path)
+    logger.info("[ML] Resampled in %.1fs (%.0f samples)", time.perf_counter() - t0, len(y_16k))
+    logger.info("[ML] Extracting effnet embeddings ...")
+    t0 = time.perf_counter()
     emb = _extract_embeddings(y_16k)
+    logger.info("[ML] Extracted %d embedding patches in %.1fs", emb.shape[0], time.perf_counter() - t0)
     _embedding_cache[audio_path] = emb
     return emb
 
@@ -476,6 +488,8 @@ def ml_classify_genre(
     Falls back to fallback_fn() on any error.
     """
     try:
+        logger.info("[ML] Running genre classification ...")
+        t0 = time.perf_counter()
         y_16k = _load_audio_16k(audio_path)
         mel = _compute_effnet_mel(y_16k)
         n_mel_frames = mel.shape[0]
@@ -534,8 +548,9 @@ def ml_classify_genre(
         genre_id = int(np.argmax(probs_7))
         confidence = float(probs_7[genre_id])
 
-        logger.info("[ML] Genre: %d (confidence=%.2f) probs=%s",
-                     genre_id, confidence, np.round(probs_7, 3))
+        dt = time.perf_counter() - t0
+        logger.info("[ML] Genre: %d (confidence=%.2f) in %.1fs — probs=%s",
+                     genre_id, confidence, dt, np.round(probs_7, 3))
         return genre_id, confidence, probs_7
 
     except Exception as e:
@@ -559,6 +574,8 @@ def ml_detect_vocal(
     Returns (n_frames,) float32 array of vocal presence [0, 1].
     """
     try:
+        logger.info("[ML] Running vocal detection ...")
+        t0 = time.perf_counter()
         embeddings = _get_embeddings_cached(audio_path)
         n_patches = embeddings.shape[0]
 
@@ -583,8 +600,9 @@ def ml_detect_vocal(
             frame_times = np.linspace(0, 1, n_frames)
             vocal_presence = np.interp(frame_times, patch_times, vocal_scores).astype(np.float32)
 
-        logger.info("[ML] Vocal detection: mean=%.2f, max=%.2f",
-                     float(np.mean(vocal_presence)), float(np.max(vocal_presence)))
+        dt = time.perf_counter() - t0
+        logger.info("[ML] Vocal detection: mean=%.2f, max=%.2f in %.1fs",
+                     float(np.mean(vocal_presence)), float(np.max(vocal_presence)), dt)
         return vocal_presence
 
     except Exception as e:
@@ -603,7 +621,7 @@ def ml_compute_valence_arousal(
     fps: float,
     fallback_fn,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute valence and arousal using mood classification models.
+    """Compute valence and arousal using 4 mood classification models.
 
     Uses 4 mood classifiers as proxies:
       - happy/sad → valence
@@ -612,6 +630,8 @@ def ml_compute_valence_arousal(
     Returns (valence, arousal) each (n_frames,) float32 in [0, 1].
     """
     try:
+        logger.info("[ML] Computing valence/arousal (4 mood models) ...")
+        t0 = time.perf_counter()
         embeddings = _get_embeddings_cached(audio_path)
         n_patches = embeddings.shape[0]
 
@@ -666,8 +686,9 @@ def ml_compute_valence_arousal(
         valence = uniform_filter1d(valence, smooth_w).astype(np.float32)
         arousal = uniform_filter1d(arousal, smooth_w).astype(np.float32)
 
-        logger.info("[ML] Valence: mean=%.2f, Arousal: mean=%.2f",
-                     float(np.mean(valence)), float(np.mean(arousal)))
+        dt = time.perf_counter() - t0
+        logger.info("[ML] Valence: mean=%.2f, Arousal: mean=%.2f in %.1fs",
+                     float(np.mean(valence)), float(np.mean(arousal)), dt)
         return valence, arousal
 
     except Exception as e:
@@ -713,7 +734,8 @@ def ml_analyze_structure(
     try:
         import allin1
 
-        logger.info("[ML] Running allin1 structure analysis...")
+        logger.info("[ML] Running allin1 structure analysis (transformer model, this may take a while) ...")
+        t0 = time.perf_counter()
         result = allin1.analyze(
             audio_path,
             model="harmonix-all",
@@ -721,6 +743,8 @@ def ml_analyze_structure(
             include_embeddings=False,
             multiprocess=False,
         )
+        dt = time.perf_counter() - t0
+        logger.info("[ML] allin1 finished in %.1fs", dt)
 
         segments = result.segments
         tempo = float(result.bpm) if result.bpm and result.bpm > 0 else None

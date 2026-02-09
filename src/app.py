@@ -355,14 +355,16 @@ class App:
         self.state = AppState.ANALYZING
         self.progress = 0.0
         self.status_msg = f"Analyzing: {self.current_song_title}"
+        self._analysis_stage = ""
         self._analysis_wav_path = wav_path
 
         # Run analysis in a separate process to avoid GIL blocking the UI
         self._analysis_progress = multiprocessing.Value('d', 0.0)
+        self._analysis_stage_arr = multiprocessing.Array('b', 128)
         self._analysis_queue = multiprocessing.Queue()
         self._analysis_process = multiprocessing.Process(
             target=analyze_subprocess,
-            args=(wav_path, self._analysis_progress, self._analysis_queue),
+            args=(wav_path, self._analysis_progress, self._analysis_stage_arr, self._analysis_queue),
             daemon=True,
         )
         self._analysis_process.start()
@@ -374,9 +376,17 @@ class App:
         self._draw_progress_overlay()
 
     def _update_analyzing(self):
-        # Poll progress from the subprocess
+        # Poll progress and stage from the subprocess
         if hasattr(self, '_analysis_progress'):
             self.progress = self._analysis_progress.value
+        if hasattr(self, '_analysis_stage_arr'):
+            try:
+                raw = bytes(self._analysis_stage_arr[:])
+                stage = raw.split(b'\x00', 1)[0].decode("utf-8", errors="replace")
+                if stage:
+                    self._analysis_stage = stage
+            except Exception:
+                pass
 
         # Check if result is ready (non-blocking)
         if hasattr(self, '_analysis_queue'):
@@ -402,7 +412,7 @@ class App:
     def _draw_progress_overlay(self):
         viewport = imgui.get_main_viewport()
         vp_size = viewport.size
-        win_w, win_h = 400, 100
+        win_w, win_h = 400, 120
 
         imgui.set_next_window_pos(
             ((vp_size.x - win_w) / 2, (vp_size.y - win_h) / 2),
@@ -420,6 +430,9 @@ class App:
         if expanded:
             imgui.text(self.status_msg)
             imgui.progress_bar(self.progress, (-1, 0))
+            stage = getattr(self, '_analysis_stage', '')
+            if stage and self.state == AppState.ANALYZING:
+                imgui.text_disabled(stage)
             if self.error_msg:
                 imgui.text_colored((1.0, 0.3, 0.3, 1.0), self.error_msg)
         imgui.end()

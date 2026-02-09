@@ -6,6 +6,7 @@ onset sharpness, and buildup/drop detection tuned for electronic music.
 
 from dataclasses import dataclass
 import logging
+import time
 import numpy as np
 import librosa
 from scipy.ndimage import maximum_filter1d, minimum_filter1d, uniform_filter1d
@@ -190,27 +191,40 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     """Analyze audio file and return pre-computed features.
 
     Args:
-        audio_path: Path to WAV file
-        progress_callback: Optional callable(float) with progress 0.0-1.0
+        audio_path: Path to audio file
+        progress_callback: Optional callable(float, str) with progress 0.0-1.0 and stage label
     """
-    def report(p):
+    _t0 = time.perf_counter()
+    _last_t = _t0
+
+    def report(p, stage=""):
+        nonlocal _last_t
+        now = time.perf_counter()
+        if stage:
+            elapsed = now - _last_t
+            total = now - _t0
+            logger.info("[Analysis] %3.0f%% | %s (step %.1fs, total %.1fs)", p * 100, stage, elapsed, total)
+            _last_t = now
         if progress_callback:
-            progress_callback(p)
+            progress_callback(p, stage)
 
-    report(0.0)
+    report(0.0, "Loading audio")
 
-    # Load audio
-    y, sr = librosa.load(audio_path, sr=44100, mono=True)
+    # Load audio (suppress PySoundFile/audioread warnings for non-WAV files)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        y, sr = librosa.load(audio_path, sr=44100, mono=True)
     duration = len(y) / sr
     hop_length = 735  # ~60fps at 44100 sr
     fps = sr / hop_length
 
-    report(0.03)
+    report(0.03, "Separating harmonics and percussion")
 
     # --- A1. HPSS ---
     y_harmonic, y_percussive = librosa.effects.hpss(y, margin=2.0)
 
-    report(0.08)
+    report(0.08, "Computing spectrogram")
 
     # --- 1A. Mel spectrogram (compute once, reuse for everything) ---
     S = librosa.feature.melspectrogram(
@@ -218,14 +232,14 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     )
     n_frames = S.shape[1]
 
-    report(0.13)
+    report(0.13, "Extracting energy levels")
 
     # --- RMS energy (from mel spectrogram for consistency) ---
     rms_raw = librosa.feature.rms(y=y, hop_length=hop_length)[0]
     rms_raw = _fit_length(rms_raw, n_frames)
     rms = _normalize(rms_raw)
 
-    report(0.16)
+    report(0.16, "Detecting tempo and beats")
 
     # --- A6. Tempo + beat tracking (needed for tempo-synced windows) ---
     tempo_val, beat_frames = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop_length)
@@ -240,7 +254,7 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     beat_dur = 60.0 / tempo_val
     window_s = 8.0 * beat_dur
 
-    report(0.20)
+    report(0.20, "Analyzing frequency bands")
 
     # --- 1B. Sub-band energy ---
     bass_raw = np.mean(S[:15, :], axis=0)       # bins 0-14, ~20-250Hz
@@ -253,7 +267,7 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     mid_energy = _local_normalize(mid_raw, window_s, fps)
     treble_energy = _local_normalize(treble_raw, window_s, fps)
 
-    report(0.25)
+    report(0.25, "Detecting onsets")
 
     # --- Onset strength ---
     onset_env = librosa.onset.onset_strength(y=y_percussive, sr=sr, hop_length=hop_length)
@@ -279,7 +293,7 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
                 dist = abs(i - bf) / width
                 beat_pulse[i] = max(beat_pulse[i], 1.0 - dist)
 
-    report(0.35)
+    report(0.35, "Classifying beats")
 
     # --- 1D. Beat classification (kick vs snare) + hihat ---
     bass_flux = np.sum(np.maximum(0, np.diff(S[:15, :], axis=1)), axis=0)
@@ -334,7 +348,7 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     hihat_pulse = _local_normalize(treble_flux, window_s, fps)
     hihat_pulse = _normalize(hihat_pulse ** 2)
 
-    report(0.40)
+    report(0.40, "Analyzing spectral features")
 
     # --- Spectral centroid (from harmonic component, locally normalized) ---
     cent = librosa.feature.spectral_centroid(y=y_harmonic, sr=sr, hop_length=hop_length)[0]
@@ -358,14 +372,14 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     full_flux = _fit_length(full_flux, n_frames)
     spectral_flux = _local_normalize(full_flux, window_s, fps)
 
-    report(0.50)
+    report(0.50, "Extracting chroma and key")
 
     # --- A2. Chroma / Key (from harmonic component) ---
     chroma_cqt = librosa.feature.chroma_cqt(y=y_harmonic, sr=sr, hop_length=hop_length)
     chroma_cqt = _fit_2d(chroma_cqt, n_frames)
     key_index = int(np.argmax(np.mean(chroma_cqt, axis=1)))
 
-    report(0.55)
+    report(0.55, "Segmenting song structure (this may take a moment)")
 
     # --- A3. Section segmentation ---
     # ML structure analysis provides segmentation + section types + tempo in one pass.
@@ -424,7 +438,7 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
             section_labels = np.zeros(n_frames, dtype=np.int32)
             n_sections = 1
 
-    report(0.65)
+    report(0.65, "Detecting vocals")
 
     # --- A4. Vocal detection ---
     if _ML_AVAILABLE["onnx"]:
@@ -475,7 +489,7 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     else:
         groove_factor = 0.0
 
-    report(0.75)
+    report(0.75, "Computing mel spectrum")
 
     # --- B7. Mel spectrum storage (64-bin for waveform ring) ---
     mel_64 = librosa.feature.melspectrogram(
@@ -492,7 +506,7 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
         bass_raw, rms_raw, onset_env, cent, n_frames, fps
     )
 
-    report(0.82)
+    report(0.82, "Classifying genre")
 
     # --- Genre classification ---
     if _ML_AVAILABLE["onnx"]:
@@ -525,7 +539,7 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
         vocal_presence, spectral_flux, section_type, n_frames, fps, genre_id
     )
 
-    report(0.90)
+    report(0.90, "Computing energy and mood")
 
     # --- Energy trajectory ---
     energy_trajectory = _compute_energy_trajectory(rms_raw, n_frames, fps)
@@ -551,7 +565,7 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     # --- Rhythmic density ---
     rhythmic_density = _compute_rhythmic_density(onset_env, tempo_val, n_frames, fps)
 
-    report(0.96)
+    report(0.96, "Finalizing")
 
     # --- Look-ahead features ---
     lookahead_energy_delta, lookahead_section_change, lookahead_climax = _compute_lookahead(
@@ -561,7 +575,7 @@ def analyze(audio_path: str, progress_callback=None) -> AnalysisResult:
     # Free ML embedding cache (no longer needed after analysis)
     clear_embedding_cache()
 
-    report(1.0)
+    report(1.0, "Done")
 
     return AnalysisResult(
         sr=sr,
@@ -1227,11 +1241,21 @@ def _compute_lookahead(
     )
 
 
-def analyze_subprocess(audio_path, progress_val, result_queue):
+def analyze_subprocess(audio_path, progress_val, stage_arr, result_queue):
     """Entry point for multiprocessing — runs analyze() in a separate process."""
+    import logging as _logging
+    _logging.basicConfig(
+        level=_logging.INFO,
+        format="%(asctime)s [%(name)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
     try:
-        def cb(p):
+        def cb(p, stage=""):
             progress_val.value = p
+            if stage:
+                encoded = stage.encode("utf-8")[:127]
+                stage_arr[:len(encoded)] = encoded
+                stage_arr[len(encoded)] = 0  # null terminator
         result = analyze(audio_path, progress_callback=cb)
         result_queue.put(("ok", result))
     except Exception as e:

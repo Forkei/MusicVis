@@ -8,5 +8,15 @@
     "wav_filename": "dj-Nate - Theory of Everything  OFFICIAL.mp3",
     "has_analysis": false,
     "added_at": "2026-02-09T18:16:08.314005+00:00"
+  },
+  {
+    "video_id": "local_ToE-short",
+    "title": "ToE-short",
+    "channel": "",
+    "duration": 0,
+    "duration_str": "",
+    "wav_filename": "ToE-short.m4a",
+    "has_analysis": true,
+    "added_at": "2026-02-09T18:42:35.464351+00:00"
   }
 ]

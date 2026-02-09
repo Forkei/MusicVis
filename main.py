@@ -1,7 +1,14 @@
 """MusicVis - Electric Energy Ball Music Visualizer."""
 
+import logging
 import sys
 import os
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 # Conda's ALSA can't find PipeWire plugins, so PortAudio only sees raw hardware
 # devices and grabs them exclusively. Point ALSA at the system plugin dir so the
