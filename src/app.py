@@ -2,6 +2,7 @@
 
 import multiprocessing
 import os
+import shutil
 import time
 import threading
 from enum import Enum, auto
@@ -207,6 +208,11 @@ class App:
     def _update_search(self):
         selected = self.search_panel.draw()
 
+        # Handle local file import
+        if self.search_panel.imported_file:
+            self._import_local_file(self.search_panel.imported_file)
+            self.search_panel.imported_file = None
+
         # Library panel
         lib_action = self.library_panel.draw(self.library.get_all())
         if lib_action:
@@ -248,7 +254,7 @@ class App:
         wav = self.library.wav_path(entry)
         if not os.path.isfile(wav):
             self.library.delete_song(entry["video_id"])
-            self.search_panel.error_msg = "WAV file missing — entry removed."
+            self.search_panel.error_msg = "Audio file missing — entry removed."
             return
 
         self._current_entry = entry
@@ -264,6 +270,24 @@ class App:
             self.state = AppState.PLAYING
         else:
             self._start_analysis(wav)
+
+    def _import_local_file(self, path: str):
+        """Import a local audio file into the library and play it."""
+        os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+        fname = os.path.basename(path)
+        dest = os.path.join(DOWNLOADS_DIR, fname)
+        # Copy if not already in downloads dir
+        if os.path.abspath(path) != os.path.abspath(dest):
+            shutil.copy2(path, dest)
+        # Register in library
+        stem = os.path.splitext(fname)[0]
+        song = {"title": stem.replace("_", " "), "channel": "", "duration": 0, "duration_str": ""}
+        entry = self.library.register_download(song, fname)
+        # Stop current playback and play the imported file
+        if self.state == AppState.PLAYING:
+            self.player.stop()
+            self.analysis = None
+        self._play_from_library(entry)
 
     def _handle_library_action(self, action: dict):
         """Handle play/delete/reanalyze actions from the library panel."""
@@ -299,7 +323,7 @@ class App:
                 self._start_analysis(wav)
             else:
                 self.library.delete_song(entry["video_id"])
-                self.search_panel.error_msg = "WAV file missing — entry removed."
+                self.search_panel.error_msg = "Audio file missing — entry removed."
 
     def _start_download(self, song: dict):
         self.state = AppState.DOWNLOADING

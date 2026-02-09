@@ -3,6 +3,7 @@
 import os
 import platform
 import re
+import shutil
 import threading
 
 from imgui_bundle import imgui
@@ -50,6 +51,30 @@ def _fetch_title(video_id: str, callback):
         pass  # keep the placeholder title
 
 
+_AUDIO_EXTENSIONS = [
+    ("Audio Files", "*.wav *.mp3 *.flac *.ogg *.m4a"),
+    ("All Files", "*.*"),
+]
+
+
+def _open_file_dialog() -> str | None:
+    """Open a native file dialog and return the selected path, or None."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askopenfilename(
+            title="Import Audio File",
+            filetypes=_AUDIO_EXTENSIONS,
+        )
+        root.destroy()
+        return path if path else None
+    except Exception:
+        return None
+
+
 class SearchPanel:
     """YouTube search bar and results list."""
 
@@ -60,6 +85,7 @@ class SearchPanel:
         self.searching = False
         self.error_msg = ""
         self._pending_url_result: dict | None = None
+        self.imported_file: str | None = None
 
     def draw(self) -> dict | None:
         """Draw the search panel. Returns selected result dict or None."""
@@ -112,8 +138,13 @@ class SearchPanel:
 
             imgui.separator()
 
-            # Hint text
+            # Hint text and import button
             imgui.text_disabled("Search or paste a YouTube URL")
+            imgui.same_line(imgui.get_window_width() - 110)
+            if imgui.button("Import File"):
+                path = _open_file_dialog()
+                if path:
+                    self.imported_file = path
             imgui.spacing()
 
             # Results list

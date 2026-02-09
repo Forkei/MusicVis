@@ -16,6 +16,7 @@ DOWNLOADS_DIR = os.path.join(
 LIBRARY_JSON = os.path.join(DOWNLOADS_DIR, "library.json")
 
 ANALYSIS_VERSION = 6
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
 
 
 class SongLibrary:
@@ -45,17 +46,18 @@ class SongLibrary:
     # --- Orphan scanning ---
 
     def _scan_orphans(self):
-        """Find WAV files with no library entry and create entries for them."""
+        """Find audio files with no library entry and create entries for them."""
         if not os.path.isdir(DOWNLOADS_DIR):
             return
 
-        known_wavs = {e["wav_filename"] for e in self._entries.values()}
+        known_files = {e["wav_filename"] for e in self._entries.values()}
         changed = False
 
         for fname in os.listdir(DOWNLOADS_DIR):
-            if not fname.lower().endswith(".wav"):
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in AUDIO_EXTENSIONS:
                 continue
-            if fname in known_wavs:
+            if fname in known_files:
                 continue
 
             stem = os.path.splitext(fname)[0]

@@ -1,5 +1,6 @@
 """Audio playback using sounddevice with precise position tracking."""
 
+import os
 import threading
 import numpy as np
 import sounddevice as sd
@@ -7,7 +8,7 @@ import soundfile as sf
 
 
 class AudioPlayer:
-    """Plays WAV audio with callback-based position tracking."""
+    """Plays audio with callback-based position tracking."""
 
     def __init__(self):
         self._audio_data: np.ndarray | None = None
@@ -20,9 +21,19 @@ class AudioPlayer:
         self._duration: float = 0.0
 
     def load(self, path: str):
-        """Load a WAV file for playback."""
+        """Load an audio file for playback (WAV, MP3, FLAC, OGG, M4A)."""
         self.stop()
-        data, sr = sf.read(path, dtype="float32")
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".wav":
+            data, sr = sf.read(path, dtype="float32")
+        else:
+            import librosa
+            y, sr = librosa.load(path, sr=None, mono=False)
+            # librosa returns (channels, samples) or (samples,) — transpose to (samples, channels)
+            if y.ndim == 2:
+                data = y.T.astype(np.float32)
+            else:
+                data = y.astype(np.float32)
         if data.ndim == 1:
             data = np.column_stack([data, data])
         self._audio_data = data
