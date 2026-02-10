@@ -2,13 +2,17 @@
 
 import multiprocessing
 import os
+import subprocess
 import time
 import threading
+from datetime import datetime
 from enum import Enum, auto
 
+import cv2
 import glfw
 import moderngl
 import numpy as np
+from PIL import Image
 from imgui_bundle import imgui
 from imgui_bundle.python_backends.glfw_backend import GlfwRenderer as ImGuiGlfwRenderer
 
@@ -122,9 +126,24 @@ class App:
         self._windowed_pos = glfw.get_window_pos(self.window)
         self._windowed_size = (width, height)
 
+        # Screenshot / recording state
+        self._screenshot_requested = False
+        self._recording = False
+        self._video_writer: cv2.VideoWriter | None = None
+        self._recording_path = ""
+        self._recording_start = 0.0
+
         # Idle features for when no song is loaded
         self._idle_time_start = time.time()
         self._last_directed_settings = {}
+
+        # Capture FBOs for screenshots/recording (avoids GL state corruption from screen read)
+        # Two-stage: MSAA renderbuffer (render target) → resolved texture (pixel readback)
+        self._capture_ms_rb = None
+        self._capture_ms_fbo = None
+        self._capture_tex = None
+        self._capture_fbo = None
+        self._rebuild_capture_fbo()
 
         # App start time (for relative time in shaders — 32-bit float precision)
         self._start_time = time.time()
@@ -132,23 +151,47 @@ class App:
         # Delta time tracking
         self._last_frame_time = time.time()
 
+    def _rebuild_capture_fbo(self):
+        """(Re)create capture FBOs to match renderer dimensions with MSAA."""
+        for attr in ('_capture_ms_fbo', '_capture_fbo', '_capture_ms_rb', '_capture_tex'):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                obj.release()
+        w, h = self.width, self.height
+        # Multisampled renderbuffer + FBO — matches screen's 4× MSAA quality
+        self._capture_ms_rb = self.ctx.renderbuffer((w, h), components=4, samples=4)
+        self._capture_ms_fbo = self.ctx.framebuffer(color_attachments=[self._capture_ms_rb])
+        # Resolve target — regular texture for pixel readback
+        self._capture_tex = self.ctx.texture((w, h), 4)
+        self._capture_fbo = self.ctx.framebuffer(color_attachments=[self._capture_tex])
+
     def _on_resize(self, window, width, height):
         if width > 0 and height > 0:
             self.width = width
             self.height = height
             self.ctx.viewport = (0, 0, width, height)
             self.renderer.resize(width, height)
+            self._rebuild_capture_fbo()
 
     def _on_key(self, window, key, scancode, action, mods):
         # Forward to ImGui's key callback first
         if self._imgui_key_callback:
             self._imgui_key_callback(window, key, scancode, action, mods)
 
-        # Don't handle fullscreen shortcuts when ImGui wants keyboard
+        if action != glfw.PRESS:
+            return
+
+        # Global hotkeys — always active regardless of ImGui focus
+        if key == glfw.KEY_F5:
+            self._screenshot_requested = True
+            return
+        if key == glfw.KEY_F6:
+            self._toggle_recording()
+            return
+
+        # Don't handle other shortcuts when ImGui wants keyboard
         io = imgui.get_io()
         if io.want_capture_keyboard:
-            return
-        if action != glfw.PRESS:
             return
         if key == glfw.KEY_F11 or (key == glfw.KEY_F and mods == 0):
             self._toggle_fullscreen()
@@ -174,6 +217,112 @@ class App:
             )
             self._is_fullscreen = True
 
+    def _read_capture_pixels(self) -> tuple[np.ndarray, int, int]:
+        """Read pixel data from the capture FBO (must already contain rendered frame)."""
+        w, h = self._capture_fbo.size
+        raw = self._capture_fbo.read(components=3)
+        arr = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 3)
+        return np.flipud(arr), w, h
+
+    def _save_screenshot(self, pixels: np.ndarray):
+        """Save pixel data as a PNG screenshot."""
+        os.makedirs("assets", exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join("assets", f"screenshot_{stamp}.png")
+        Image.fromarray(pixels).save(path)
+        print(f"Screenshot saved: {path}")
+
+    def _toggle_recording(self):
+        """Start or stop video recording."""
+        if self._recording:
+            self._stop_recording()
+        else:
+            self._start_recording()
+
+    def _start_recording(self):
+        os.makedirs("assets", exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._recording_path = os.path.join("assets", f"recording_{stamp}.mp4")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        self._video_writer = cv2.VideoWriter(
+            self._recording_path, fourcc, 60.0, (self.width, self.height)
+        )
+        self._recording = True
+        self._recording_start = time.time()
+        # Track audio position for muxing later
+        self._recording_audio_start = 0.0
+        self._recording_wav_path = None
+        if self.state == AppState.PLAYING and self._current_entry:
+            self._recording_audio_start = self.player.get_position()
+            self._recording_wav_path = self.library.wav_path(self._current_entry)
+        print(f"Recording started: {self._recording_path}")
+
+    def _stop_recording(self):
+        if self._video_writer is not None:
+            self._video_writer.release()
+            self._video_writer = None
+        self._recording = False
+        duration = time.time() - self._recording_start
+        print(f"Recording saved: {self._recording_path} ({duration:.1f}s)")
+        # Mux audio in background thread so UI doesn't stall
+        wav = self._recording_wav_path
+        if wav and os.path.isfile(wav):
+            video_path = self._recording_path
+            audio_start = self._recording_audio_start
+            threading.Thread(
+                target=self._mux_audio, args=(video_path, wav, audio_start),
+                daemon=True
+            ).start()
+
+    @staticmethod
+    def _mux_audio(video_path: str, wav_path: str, audio_start: float):
+        """Combine video with audio track using ffmpeg."""
+        tmp_path = video_path.replace(".mp4", "_av.mp4")
+        try:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", video_path,
+                "-ss", f"{audio_start:.3f}",
+                "-i", wav_path,
+                "-c:v", "copy", "-c:a", "aac",
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-shortest",
+                tmp_path,
+            ]
+            subprocess.run(cmd, capture_output=True, timeout=120, check=True)
+            os.replace(tmp_path, video_path)
+            print(f"Audio muxed into {video_path}")
+        except FileNotFoundError:
+            print("ffmpeg not found — recording saved without audio")
+        except Exception as e:
+            print(f"Audio mux failed: {e}")
+            if os.path.isfile(tmp_path):
+                os.remove(tmp_path)
+
+    def _record_frame_data(self, pixels: np.ndarray):
+        """Write pre-read pixel data into the video writer."""
+        if self._video_writer is None:
+            return
+        bgr = cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR)
+        self._video_writer.write(bgr)
+
+    def _draw_recording_indicator(self):
+        """Draw a small red recording dot + duration in the top-right corner."""
+        elapsed = time.time() - self._recording_start
+        mins, secs = divmod(int(elapsed), 60)
+        label = f"REC {mins:02d}:{secs:02d}"
+
+        draw_list = imgui.get_foreground_draw_list()
+        x = imgui.get_io().display_size.x - 110
+        y = 12
+        # Pulsing red dot
+        pulse = 0.6 + 0.4 * abs((elapsed * 2.0) % 2.0 - 1.0)
+        red = imgui.get_color_u32(imgui.ImVec4(1.0, 0.1, 0.1, pulse))
+        draw_list.add_circle_filled(imgui.ImVec2(x, y + 7), 6, red)
+        # Text
+        white = imgui.get_color_u32(imgui.ImVec4(1.0, 1.0, 1.0, 0.9))
+        draw_list.add_text(imgui.ImVec2(x + 12, y), white, label)
+
     def run(self):
         """Main loop."""
         try:
@@ -186,11 +335,17 @@ class App:
                 self._update()
                 self._render()
 
+                # Recording indicator (drawn into ImGui overlay before render)
+                if self._recording:
+                    self._draw_recording_indicator()
+
                 imgui.render()
                 self.imgui_impl.render(imgui.get_draw_data())
 
                 glfw.swap_buffers(self.window)
         finally:
+            if self._recording:
+                self._stop_recording()
             self._cleanup()
 
     def _update(self):
@@ -492,18 +647,37 @@ class App:
         particle_buffer = self.particles.segment_buffer
         particle_count = MAX_PARTICLES
 
+        # When capturing, render to our own MSAA FBO to get clean pixels (no overlays,
+        # no GL state corruption from reading the screen directly).
+        capturing = self._screenshot_requested or self._recording
+        target_fbo = self._capture_ms_fbo if capturing else None
+
         # Render with or without trails
         trail_decay = directed_settings.get("trail_decay", 0.0)
         if trail_decay > 0.01:
             self.renderer.render_with_trail(
                 seg_buffer, compute_count, ring_segs, render_settings,
-                trail_decay, delta_time, particle_buffer, particle_count
+                trail_decay, delta_time, particle_buffer, particle_count,
+                target_fbo=target_fbo,
             )
         else:
             self.renderer.render(
                 seg_buffer, compute_count, ring_segs, render_settings,
-                delta_time, particle_buffer, particle_count
+                delta_time, particle_buffer, particle_count,
+                target_fbo=target_fbo,
             )
+
+        if capturing:
+            # Resolve MSAA → regular texture, then blit to screen for display
+            self.ctx.copy_framebuffer(dst=self._capture_fbo, src=self._capture_ms_fbo)
+            self.ctx.copy_framebuffer(dst=self.ctx.screen, src=self._capture_fbo)
+            # Read resolved pixels (no GL state corruption — reading our own FBO)
+            pixels, w, h = self._read_capture_pixels()
+            if self._screenshot_requested:
+                self._screenshot_requested = False
+                self._save_screenshot(pixels)
+            if self._recording:
+                self._record_frame_data(pixels)
 
     def _get_current_features(self) -> dict:
         """Get audio features for current playback position."""
@@ -553,6 +727,10 @@ class App:
         self.ball_gen.cleanup()
         self.particles.cleanup()
         self.renderer.cleanup()
+        for attr in ('_capture_ms_fbo', '_capture_fbo', '_capture_ms_rb', '_capture_tex'):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                obj.release()
         self.imgui_impl.shutdown()
         imgui.destroy_context()
         glfw.terminate()

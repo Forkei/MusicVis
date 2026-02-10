@@ -361,7 +361,8 @@ class Renderer:
                ring_segments: np.ndarray | None, settings: dict,
                delta_time: float = 0.016,
                particle_buffer: moderngl.Buffer | None = None,
-               particle_count: int = 0):
+               particle_count: int = 0,
+               target_fbo=None):
         """Render one frame (no trails).
 
         Args:
@@ -372,16 +373,18 @@ class Renderer:
             delta_time: time since last frame in seconds
             particle_buffer: Optional SSBO with particle segments
             particle_count: Number of particle segments
+            target_fbo: If set, composite to this FBO instead of screen
         """
         self._render_scene(segment_buffer, compute_count, ring_segments,
                           particle_buffer, particle_count, settings)
-        self._render_bloom_composite(settings)
+        self._render_bloom_composite(settings, target_fbo=target_fbo)
 
     def render_with_trail(self, segment_buffer: moderngl.Buffer, compute_count: int,
                           ring_segments: np.ndarray | None, settings: dict,
                           trail_decay: float, delta_time: float = 0.016,
                           particle_buffer: moderngl.Buffer | None = None,
-                          particle_count: int = 0):
+                          particle_count: int = 0,
+                          target_fbo=None):
         """Render one frame with motion trails.
 
         Composites prev_trail * decay + current_scene into trail FBO,
@@ -420,7 +423,7 @@ class Renderer:
         # Swap scene_tex temporarily
         original_scene_tex = self.scene_tex
         self.scene_tex = result_tex
-        self._render_bloom_composite(settings)
+        self._render_bloom_composite(settings, target_fbo=target_fbo)
         self.scene_tex = original_scene_tex
 
     def cleanup(self):
