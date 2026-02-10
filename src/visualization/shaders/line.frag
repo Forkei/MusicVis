@@ -16,6 +16,7 @@ uniform float u_global_hue;      // From spectral centroid (0-1)
 uniform float u_depth_fog;       // 0-1 fog intensity
 uniform vec3 u_fog_color;        // Fog color (matches bloom tint)
 uniform float u_saturation;      // Director-driven saturation
+uniform float u_rms;             // Audio RMS energy (0-1)
 
 // HSV to RGB conversion
 vec3 hsv2rgb(float h, float s, float v) {
@@ -43,12 +44,15 @@ void main() {
     // Hue-based coloring: global centroid hue + per-instance offset
     float hue = fract(u_global_hue + v_hue);
 
-    // Saturation: foreground lines more saturated, flash boosts saturation
+    // Saturation: tonal certainty base + depth + flash
     float sat = u_saturation + v_depth * 0.1 + u_flash * 0.05;
-    vec3 base_color = hsv2rgb(hue, clamp(sat, 0.7, 1.0), 1.0);
+    // Energy-driven HSV value: quiet=dim, loud=bright
+    float hsv_value = 0.55 + u_rms * 0.45;
+    vec3 base_color = hsv2rgb(hue, clamp(sat, 0.3, 1.0), hsv_value);
 
     // Blend toward bright version of the same hue for the core (preserves color)
-    vec3 hot_color = hsv2rgb(hue, 0.55, 1.0);
+    float hot_sat = clamp(sat * 0.65, 0.2, 0.7);
+    vec3 hot_color = hsv2rgb(hue, hot_sat, hsv_value);
     vec3 line_color = mix(base_color, hot_color, core * 0.4);
     vec3 color = line_color * glow * v_brightness;
 

@@ -90,6 +90,8 @@ class _DirectorState:
         "prev_section_type", "section_transition_t",
         "saturation_offset", "vignette_offset", "chromatic_offset",
         "bg_intensity_offset", "color_temp_shift", "rotation_tempo_scale",
+        # Tonal certainty smoothing
+        "tonal_certainty_smooth",
         # Auto base smoothing
         "auto_brightness", "auto_bloom_intensity", "auto_anamorphic_flare",
         "auto_loop_count", "auto_noise_mult", "auto_rotation_speed",
@@ -120,6 +122,7 @@ class _DirectorState:
         self.bg_intensity_offset = 0.0
         self.color_temp_shift = 0.0
         self.rotation_tempo_scale = 1.0
+        self.tonal_certainty_smooth = 0.5
         # Auto values — initialize at midpoint of Pop ranges (subdued ball)
         pop = _AUTO_GENRE_RANGES[6]
         self.auto_brightness = sum(pop["brightness"]) / 2.0
@@ -159,6 +162,7 @@ _DEFAULT_SECTION = {
     "brightness": 1.0, "energy": 1.0, "bloom": 1.0, "noise": 1.0,
     "rotation": 1.0, "loop_offset": 0, "anamorphic": 1.0, "fog_offset": 0.0,
     "trail": 0.0, "particle": 0.0,
+    "hue_center": None, "hue_range": 0.5,
 }
 
 
@@ -172,119 +176,119 @@ def _sv(**kwargs):
 # --- 7 Genre Profiles ---
 
 _PROFILES = {
-    0: _GenreProfile(  # EDM
+    0: _GenreProfile(  # EDM — cool verses, warm choruses, hot drops
         section_visuals={
             0: _sv(brightness=0.7, energy=0.6, bloom=0.8, noise=0.5, trail=0.3),        # intro
-            1: _sv(brightness=0.9, energy=0.9, bloom=1.0, noise=0.8),                    # verse
-            2: _sv(brightness=1.3, energy=1.3, bloom=1.5, loop_offset=3, anamorphic=1.4), # chorus
-            3: _sv(brightness=0.8, energy=0.7, bloom=0.9, noise=1.2),                    # bridge
-            4: _sv(brightness=0.5, energy=0.4, bloom=0.6, noise=1.5, fog_offset=0.15, trail=0.5),  # breakdown
-            5: _sv(brightness=0.9, energy=1.1, bloom=1.2, noise=1.3, rotation=1.5),      # buildup
-            6: _sv(brightness=1.5, energy=1.5, bloom=2.0, loop_offset=5, anamorphic=1.8, particle=0.8), # drop
-            7: _sv(brightness=0.6, energy=0.5, bloom=0.7, noise=0.4, trail=0.4),        # outro
-            8: _sv(brightness=1.2, energy=1.2, bloom=1.3, noise=0.6),                    # solo
+            1: _sv(brightness=0.9, energy=0.9, bloom=1.0, noise=0.8, hue_center=0.6, hue_range=0.15),  # verse (cool blues)
+            2: _sv(brightness=1.3, energy=1.3, bloom=1.5, loop_offset=3, anamorphic=1.4, hue_center=0.05, hue_range=0.2),  # chorus (warm reds)
+            3: _sv(brightness=0.8, energy=0.7, bloom=0.9, noise=1.2, hue_center=0.33, hue_range=0.1),  # bridge (greens)
+            4: _sv(brightness=0.5, energy=0.4, bloom=0.6, noise=1.5, fog_offset=0.15, trail=0.5, hue_center=0.55, hue_range=0.08),  # breakdown (desaturated cool)
+            5: _sv(brightness=0.9, energy=1.1, bloom=1.2, noise=1.3, rotation=1.5),      # buildup (free)
+            6: _sv(brightness=1.5, energy=1.5, bloom=2.0, loop_offset=5, anamorphic=1.8, particle=0.8, hue_center=0.85, hue_range=0.1),  # drop (hot magenta)
+            7: _sv(brightness=0.6, energy=0.5, bloom=0.7, noise=0.4, trail=0.4),        # outro (free)
+            8: _sv(brightness=1.2, energy=1.2, bloom=1.3, noise=0.6),                    # solo (free)
         },
         climax_intensity=2.0,
         beat_reactivity=1.5,
         trail_preference=0.2,
         particle_preference=0.8,
     ),
-    1: _GenreProfile(  # Rock
+    1: _GenreProfile(  # Rock — warm palette, fiery chorus
         section_visuals={
-            0: _sv(brightness=0.7, energy=0.6, bloom=0.8),
-            1: _sv(brightness=0.9, energy=0.9, bloom=1.0),
-            2: _sv(brightness=1.3, energy=1.3, bloom=1.4, loop_offset=2, anamorphic=1.3, particle=0.5),
-            3: _sv(brightness=0.8, energy=0.7, bloom=0.9, noise=1.1),
-            4: _sv(brightness=0.6, energy=0.5, bloom=0.7, trail=0.3),
-            5: _sv(brightness=1.0, energy=1.1, bloom=1.2, rotation=1.3),
-            6: _sv(brightness=1.4, energy=1.4, bloom=1.6, particle=0.7),
-            7: _sv(brightness=0.6, energy=0.5, bloom=0.7, trail=0.3),
-            8: _sv(brightness=1.4, energy=1.3, bloom=1.5, noise=0.5, rotation=1.4, particle=0.4),
+            0: _sv(brightness=0.7, energy=0.6, bloom=0.8),                                # intro (free)
+            1: _sv(brightness=0.9, energy=0.9, bloom=1.0, hue_center=0.08, hue_range=0.15),  # verse (warm amber)
+            2: _sv(brightness=1.3, energy=1.3, bloom=1.4, loop_offset=2, anamorphic=1.3, particle=0.5, hue_center=0.0, hue_range=0.2),  # chorus (fiery red)
+            3: _sv(brightness=0.8, energy=0.7, bloom=0.9, noise=1.1, hue_center=0.15, hue_range=0.12),  # bridge (golden)
+            4: _sv(brightness=0.6, energy=0.5, bloom=0.7, trail=0.3, hue_center=0.55, hue_range=0.1),  # breakdown (cool)
+            5: _sv(brightness=1.0, energy=1.1, bloom=1.2, rotation=1.3),                  # buildup (free)
+            6: _sv(brightness=1.4, energy=1.4, bloom=1.6, particle=0.7, hue_center=0.95, hue_range=0.15),  # drop (hot orange-red)
+            7: _sv(brightness=0.6, energy=0.5, bloom=0.7, trail=0.3),                    # outro (free)
+            8: _sv(brightness=1.4, energy=1.3, bloom=1.5, noise=0.5, rotation=1.4, particle=0.4, hue_center=0.12, hue_range=0.18),  # solo (warm gold)
         },
         climax_intensity=1.6,
         beat_reactivity=1.2,
         trail_preference=0.3,
         particle_preference=0.6,
     ),
-    2: _GenreProfile(  # Jazz
+    2: _GenreProfile(  # Jazz — golden warmth, smoky bridges
         section_visuals={
-            0: _sv(brightness=0.8, energy=0.7, bloom=0.9, trail=0.4),
-            1: _sv(brightness=0.9, energy=0.8, bloom=1.0, noise=1.1),
-            2: _sv(brightness=1.1, energy=1.1, bloom=1.2, loop_offset=1),
-            3: _sv(brightness=0.9, energy=0.8, bloom=1.0, noise=1.2),
-            4: _sv(brightness=0.7, energy=0.6, bloom=0.8, trail=0.5),
-            5: _sv(brightness=1.0, energy=1.0, bloom=1.1),
-            6: _sv(brightness=1.2, energy=1.2, bloom=1.3),
-            7: _sv(brightness=0.7, energy=0.6, bloom=0.8, trail=0.5),
-            8: _sv(brightness=1.3, energy=1.2, bloom=1.4, noise=0.6, rotation=1.2),
+            0: _sv(brightness=0.8, energy=0.7, bloom=0.9, trail=0.4),                    # intro (free)
+            1: _sv(brightness=0.9, energy=0.8, bloom=1.0, noise=1.1, hue_center=0.1, hue_range=0.12),  # verse (warm gold)
+            2: _sv(brightness=1.1, energy=1.1, bloom=1.2, loop_offset=1, hue_center=0.08, hue_range=0.18),  # chorus (amber)
+            3: _sv(brightness=0.9, energy=0.8, bloom=1.0, noise=1.2, hue_center=0.55, hue_range=0.1),  # bridge (smoky blue)
+            4: _sv(brightness=0.7, energy=0.6, bloom=0.8, trail=0.5, hue_center=0.45, hue_range=0.08),  # breakdown (dusky teal)
+            5: _sv(brightness=1.0, energy=1.0, bloom=1.1),                                # buildup (free)
+            6: _sv(brightness=1.2, energy=1.2, bloom=1.3, hue_center=0.12, hue_range=0.15),  # drop (bright gold)
+            7: _sv(brightness=0.7, energy=0.6, bloom=0.8, trail=0.5),                    # outro (free)
+            8: _sv(brightness=1.3, energy=1.2, bloom=1.4, noise=0.6, rotation=1.2, hue_center=0.15, hue_range=0.2),  # solo (golden)
         },
         climax_intensity=1.0,
         beat_reactivity=0.6,
         trail_preference=0.5,
         particle_preference=0.2,
     ),
-    3: _GenreProfile(  # Classical
+    3: _GenreProfile(  # Classical — violet/blue tones, warm crescendos
         section_visuals={
-            0: _sv(brightness=0.7, energy=0.5, bloom=0.9, trail=0.6, fog_offset=0.1),
-            1: _sv(brightness=0.8, energy=0.7, bloom=1.0, trail=0.4),
-            2: _sv(brightness=1.2, energy=1.2, bloom=1.5, loop_offset=2, anamorphic=1.3, trail=0.3),
-            3: _sv(brightness=0.9, energy=0.8, bloom=1.1, trail=0.5),
-            4: _sv(brightness=0.6, energy=0.4, bloom=0.8, trail=0.7, fog_offset=0.15),
-            5: _sv(brightness=1.0, energy=1.1, bloom=1.3, rotation=1.2),
-            6: _sv(brightness=1.3, energy=1.4, bloom=1.6, anamorphic=1.5),
-            7: _sv(brightness=0.6, energy=0.4, bloom=0.8, trail=0.7),
-            8: _sv(brightness=1.3, energy=1.2, bloom=1.4, noise=0.5),
+            0: _sv(brightness=0.7, energy=0.5, bloom=0.9, trail=0.6, fog_offset=0.1),    # intro (free)
+            1: _sv(brightness=0.8, energy=0.7, bloom=1.0, trail=0.4, hue_center=0.7, hue_range=0.15),  # verse (violet)
+            2: _sv(brightness=1.2, energy=1.2, bloom=1.5, loop_offset=2, anamorphic=1.3, trail=0.3, hue_center=0.08, hue_range=0.2),  # chorus (warm rose)
+            3: _sv(brightness=0.9, energy=0.8, bloom=1.1, trail=0.5, hue_center=0.58, hue_range=0.1),  # bridge (blue)
+            4: _sv(brightness=0.6, energy=0.4, bloom=0.8, trail=0.7, fog_offset=0.15, hue_center=0.65, hue_range=0.08),  # breakdown (deep blue)
+            5: _sv(brightness=1.0, energy=1.1, bloom=1.3, rotation=1.2),                  # buildup (free)
+            6: _sv(brightness=1.3, energy=1.4, bloom=1.6, anamorphic=1.5, hue_center=0.05, hue_range=0.15),  # drop (warm burst)
+            7: _sv(brightness=0.6, energy=0.4, bloom=0.8, trail=0.7),                    # outro (free)
+            8: _sv(brightness=1.3, energy=1.2, bloom=1.4, noise=0.5, hue_center=0.75, hue_range=0.18),  # solo (violet-magenta)
         },
         climax_intensity=1.8,
         beat_reactivity=0.4,
         trail_preference=0.7,
         particle_preference=0.15,
     ),
-    4: _GenreProfile(  # Hip-Hop
+    4: _GenreProfile(  # Hip-Hop — purple/magenta verse, red chorus
         section_visuals={
-            0: _sv(brightness=0.7, energy=0.6, bloom=0.8),
-            1: _sv(brightness=0.9, energy=0.9, bloom=1.0),
-            2: _sv(brightness=1.2, energy=1.2, bloom=1.3, loop_offset=2, particle=0.4),
-            3: _sv(brightness=0.8, energy=0.7, bloom=0.9),
-            4: _sv(brightness=0.6, energy=0.5, bloom=0.7, trail=0.3),
-            5: _sv(brightness=1.0, energy=1.1, bloom=1.2),
-            6: _sv(brightness=1.3, energy=1.3, bloom=1.5, particle=0.6),
-            7: _sv(brightness=0.6, energy=0.5, bloom=0.7),
-            8: _sv(brightness=1.2, energy=1.1, bloom=1.3, noise=0.6),
+            0: _sv(brightness=0.7, energy=0.6, bloom=0.8),                                # intro (free)
+            1: _sv(brightness=0.9, energy=0.9, bloom=1.0, hue_center=0.78, hue_range=0.15),  # verse (purple)
+            2: _sv(brightness=1.2, energy=1.2, bloom=1.3, loop_offset=2, particle=0.4, hue_center=0.0, hue_range=0.18),  # chorus (red)
+            3: _sv(brightness=0.8, energy=0.7, bloom=0.9, hue_center=0.55, hue_range=0.1),  # bridge (cool blue)
+            4: _sv(brightness=0.6, energy=0.5, bloom=0.7, trail=0.3, hue_center=0.6, hue_range=0.08),  # breakdown (muted blue)
+            5: _sv(brightness=1.0, energy=1.1, bloom=1.2),                                # buildup (free)
+            6: _sv(brightness=1.3, energy=1.3, bloom=1.5, particle=0.6, hue_center=0.9, hue_range=0.12),  # drop (magenta)
+            7: _sv(brightness=0.6, energy=0.5, bloom=0.7),                                # outro (free)
+            8: _sv(brightness=1.2, energy=1.1, bloom=1.3, noise=0.6, hue_center=0.82, hue_range=0.15),  # solo (purple)
         },
         climax_intensity=1.4,
         beat_reactivity=1.3,
         trail_preference=0.25,
         particle_preference=0.5,
     ),
-    5: _GenreProfile(  # Ambient
+    5: _GenreProfile(  # Ambient — oceanic teals, ethereal
         section_visuals={
-            0: _sv(brightness=0.8, energy=0.5, bloom=1.2, trail=0.8, fog_offset=0.2, noise=0.6),
-            1: _sv(brightness=0.9, energy=0.6, bloom=1.3, trail=0.7, fog_offset=0.15),
-            2: _sv(brightness=1.1, energy=0.8, bloom=1.5, trail=0.6, anamorphic=1.2),
-            3: _sv(brightness=0.9, energy=0.6, bloom=1.3, trail=0.7),
-            4: _sv(brightness=0.7, energy=0.4, bloom=1.1, trail=0.9, fog_offset=0.25),
-            5: _sv(brightness=1.0, energy=0.7, bloom=1.4, trail=0.6),
-            6: _sv(brightness=1.1, energy=0.9, bloom=1.5, trail=0.5),
-            7: _sv(brightness=0.7, energy=0.4, bloom=1.1, trail=0.9, fog_offset=0.2),
-            8: _sv(brightness=1.0, energy=0.7, bloom=1.3, trail=0.6),
+            0: _sv(brightness=0.8, energy=0.5, bloom=1.2, trail=0.8, fog_offset=0.2, noise=0.6),  # intro (free)
+            1: _sv(brightness=0.9, energy=0.6, bloom=1.3, trail=0.7, fog_offset=0.15, hue_center=0.5, hue_range=0.12),  # verse (teal)
+            2: _sv(brightness=1.1, energy=0.8, bloom=1.5, trail=0.6, anamorphic=1.2, hue_center=0.45, hue_range=0.2),  # chorus (cyan-green)
+            3: _sv(brightness=0.9, energy=0.6, bloom=1.3, trail=0.7, hue_center=0.6, hue_range=0.1),  # bridge (blue)
+            4: _sv(brightness=0.7, energy=0.4, bloom=1.1, trail=0.9, fog_offset=0.25, hue_center=0.55, hue_range=0.08),  # breakdown (deep teal)
+            5: _sv(brightness=1.0, energy=0.7, bloom=1.4, trail=0.6),                    # buildup (free)
+            6: _sv(brightness=1.1, energy=0.9, bloom=1.5, trail=0.5, hue_center=0.42, hue_range=0.15),  # drop (bright aqua)
+            7: _sv(brightness=0.7, energy=0.4, bloom=1.1, trail=0.9, fog_offset=0.2),    # outro (free)
+            8: _sv(brightness=1.0, energy=0.7, bloom=1.3, trail=0.6),                    # solo (free)
         },
         climax_intensity=0.5,
         beat_reactivity=0.1,
         trail_preference=0.9,
         particle_preference=0.1,
     ),
-    6: _GenreProfile(  # Pop
+    6: _GenreProfile(  # Pop — bright palette, pink chorus, blue verse
         section_visuals={
-            0: _sv(brightness=0.7, energy=0.6, bloom=0.9),
-            1: _sv(brightness=0.9, energy=0.9, bloom=1.0),
-            2: _sv(brightness=1.3, energy=1.3, bloom=1.5, loop_offset=3, anamorphic=1.3, particle=0.3),
-            3: _sv(brightness=0.8, energy=0.7, bloom=0.9, noise=1.1),
-            4: _sv(brightness=0.6, energy=0.5, bloom=0.7, trail=0.3),
-            5: _sv(brightness=1.0, energy=1.1, bloom=1.2, rotation=1.2),
-            6: _sv(brightness=1.4, energy=1.4, bloom=1.7, particle=0.6),
-            7: _sv(brightness=0.6, energy=0.5, bloom=0.7, trail=0.3),
-            8: _sv(brightness=1.2, energy=1.1, bloom=1.3),
+            0: _sv(brightness=0.7, energy=0.6, bloom=0.9),                                # intro (free)
+            1: _sv(brightness=0.9, energy=0.9, bloom=1.0, hue_center=0.58, hue_range=0.15),  # verse (blue)
+            2: _sv(brightness=1.3, energy=1.3, bloom=1.5, loop_offset=3, anamorphic=1.3, particle=0.3, hue_center=0.92, hue_range=0.18),  # chorus (pink)
+            3: _sv(brightness=0.8, energy=0.7, bloom=0.9, noise=1.1, hue_center=0.35, hue_range=0.1),  # bridge (green)
+            4: _sv(brightness=0.6, energy=0.5, bloom=0.7, trail=0.3, hue_center=0.5, hue_range=0.08),  # breakdown (teal)
+            5: _sv(brightness=1.0, energy=1.1, bloom=1.2, rotation=1.2),                  # buildup (free)
+            6: _sv(brightness=1.4, energy=1.4, bloom=1.7, particle=0.6, hue_center=0.0, hue_range=0.15),  # drop (red)
+            7: _sv(brightness=0.6, energy=0.5, bloom=0.7, trail=0.3),                    # outro (free)
+            8: _sv(brightness=1.2, energy=1.1, bloom=1.3),                                # solo (free)
         },
         climax_intensity=1.5,
         beat_reactivity=1.0,
@@ -440,6 +444,7 @@ class MusicalDirector:
             result["director_genre"] = ""
             result["director_section"] = ""
             result["director_climax"] = 0.0
+            result["director_tonal_certainty"] = 0.5
             # Still compute + smooth auto values from audio for UI display
             genre_id = features.get("genre_id", 6)
             auto_targets = self._compute_auto_values(features, genre_id)
@@ -520,8 +525,9 @@ class MusicalDirector:
         # Tempo → rotation scaling (normalized around 120 BPM)
         rotation_tempo_scale = tempo / 120.0
 
-        # Valence → saturation (happy=vivid, sad=muted)
-        saturation_offset = (valence - 0.5) * 0.2
+        # Tonal certainty → saturation (clear chord = vivid, noise = washed out)
+        tonal_certainty = features.get("tonal_certainty", 0.5)
+        saturation_offset = (tonal_certainty - 0.5) * 0.5 + (valence - 0.5) * 0.1
 
         # Valence → color temperature (happy=warm, sad=cool)
         color_temp_shift = (valence - 0.5) * 0.15
@@ -609,8 +615,24 @@ class MusicalDirector:
         # Arousal-driven rotation
         rotation *= (0.7 + arousal * 0.6)
 
-        # Valence-driven hue shift
-        hue_shift = (valence - 0.5) * 0.1  # warm for major, cool for minor
+        # Section-palette-aware hue shift
+        chroma_hue = features.get("chroma_hue", 0.5)
+        hue_center = sv.get("hue_center")
+        hue_range = sv.get("hue_range", 0.5)
+        if hue_center is not None:
+            # Circular distance from chroma_hue to section center
+            diff = chroma_hue - hue_center
+            # Wrap to [-0.5, 0.5]
+            diff = diff - math.floor(diff + 0.5)
+            # Pull toward center: stronger when far outside range
+            if abs(diff) > hue_range:
+                overshoot = abs(diff) - hue_range
+                pull = -diff * min(1.0, overshoot / 0.2) * 0.4
+            else:
+                pull = 0.0
+            hue_shift = pull + (valence - 0.5) * 0.06
+        else:
+            hue_shift = (valence - 0.5) * 0.06
 
         # Vocal presence: reduce noise, add fog for depth
         if vocal > 0.5:
@@ -648,6 +670,7 @@ class MusicalDirector:
             "bg_intensity_offset": bg_intensity_offset,
             "color_temp_shift": color_temp_shift,
             "rotation_tempo_scale": rotation_tempo_scale,
+            "tonal_certainty": features.get("tonal_certainty", 0.5),
         }
 
     def _smooth_state(self, targets: dict, dt: float):
@@ -671,6 +694,7 @@ class MusicalDirector:
         s.bg_intensity_offset = _exp_smooth(s.bg_intensity_offset, targets["bg_intensity_offset"], _TAU_SLOW, dt)
         s.color_temp_shift = _exp_smooth(s.color_temp_shift, targets["color_temp_shift"], _TAU_SLOW, dt)
         s.rotation_tempo_scale = _exp_smooth(s.rotation_tempo_scale, targets["rotation_tempo_scale"], _TAU_SLOW, dt)
+        s.tonal_certainty_smooth = _exp_smooth(s.tonal_certainty_smooth, targets.get("tonal_certainty", 0.5), _TAU_SLOW, dt)
 
     def _apply_to_settings(self, base: dict, intensity: float, features: dict,
                            profile: _GenreProfile) -> dict:
@@ -762,6 +786,7 @@ class MusicalDirector:
         result["director_bg_boost"] = s.bg_intensity_offset * intensity
         result["director_color_temp"] = s.color_temp_shift * intensity
         result["director_rotation_tempo"] = 1.0 + (s.rotation_tempo_scale - 1.0) * intensity
+        result["director_tonal_certainty"] = s.tonal_certainty_smooth
 
         # Status info for UI overlay
         genre_id = features.get("genre_id", 6)

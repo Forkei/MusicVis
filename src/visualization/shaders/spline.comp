@@ -208,6 +208,13 @@ void main() {
     // Per-segment hue variation: shift by depth and position along loop
     float seg_progress = float(local_id) / 240.0;
     float hue_variation = depth_norm * 0.08 + seg_progress * 0.05;
-    segment_data[out_base + 6] = hue_offset + hue_variation;
+
+    // Band-reactive hue shift: bass loops warm, treble loops cool
+    float band_hue_shift = 0.0;
+    if (band_index < 0.5)       band_hue_shift = band_energy * 0.12;   // bass: warm
+    else if (band_index > 1.5)  band_hue_shift = -band_energy * 0.10;  // treble: cool
+    else                         band_hue_shift = band_energy * 0.05;   // mid: subtle
+
+    segment_data[out_base + 6] = hue_offset + hue_variation + band_hue_shift;
     segment_data[out_base + 7] = depth_norm;
 }

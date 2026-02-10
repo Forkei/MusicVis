@@ -86,7 +86,7 @@ class ParticleSystem:
         # Spawn particles on CPU
         if n_spawn > 0 and ball_radius > 1.0:
             n_spawn = min(n_spawn, 64)  # cap per frame
-            hue_base = features.get("spectral_centroid", 0.5) * 0.85 + 0.05 + 0.35
+            hue_base = settings.get("global_hue", 0.5) + 0.5  # complementary to ball
             speed_base = (50.0 + particle_energy * 200.0 + arousal * 50.0 + explosion * 100.0) * max(1.0, ball_radius / 50.0)
 
             for _ in range(n_spawn):
@@ -103,7 +103,7 @@ class ParticleSystem:
 
                 life = self._rng.uniform(0.3, 1.2) + vocal * 0.3
                 brightness = self._rng.uniform(0.3, 0.8) * (0.5 + particle_energy)
-                hue = hue_base + self._rng.uniform(-0.1, 0.1) + (valence - 0.5) * 0.05
+                hue = hue_base + self._rng.uniform(-0.08, 0.08)
 
                 slot = self._next_slot
                 base = slot * 8

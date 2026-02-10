@@ -1,5 +1,6 @@
 """Main application: GLFW window + moderngl + imgui + audio integration."""
 
+import math
 import multiprocessing
 import os
 import subprocess
@@ -136,6 +137,10 @@ class App:
         # Idle features for when no song is loaded
         self._idle_time_start = time.time()
         self._last_directed_settings = {}
+
+        # Circular hue smoothing state (sin/cos components)
+        self._smoothed_hue_sin = 0.0
+        self._smoothed_hue_cos = 1.0
 
         # Capture FBOs for screenshots/recording (avoids GL state corruption from screen read)
         # Two-stage: MSAA renderbuffer (render target) → resolved texture (pixel readback)
@@ -619,8 +624,20 @@ class App:
         self._last_directed_settings = directed_settings
 
         # Compute global hue early so ball_gen can use it for ring coloring
-        global_hue = features.get("spectral_centroid", 0.5) * 0.85 + 0.05
-        global_hue += features.get("key_index", 0) / 12.0 * 0.08  # subtle personality per key
+        chroma_hue = features.get("chroma_hue", 0.5)
+        centroid_texture = features.get("spectral_centroid", 0.5) * 0.08
+        raw_hue = chroma_hue + centroid_texture
+
+        # Circular exponential smoothing (200ms tau) to prevent jitter
+        tau = 0.2
+        alpha = 1.0 - math.exp(-delta_time / tau) if tau > 0.001 else 1.0
+        target_angle = raw_hue * 2.0 * math.pi
+        self._smoothed_hue_sin += (math.sin(target_angle) - self._smoothed_hue_sin) * alpha
+        self._smoothed_hue_cos += (math.cos(target_angle) - self._smoothed_hue_cos) * alpha
+        smoothed_angle = math.atan2(self._smoothed_hue_sin, self._smoothed_hue_cos)
+        if smoothed_angle < 0:
+            smoothed_angle += 2.0 * math.pi
+        global_hue = smoothed_angle / (2.0 * math.pi)
         directed_settings["global_hue"] = global_hue
 
         seg_buffer, compute_count, ring_segs = self.ball_gen.generate(
@@ -720,6 +737,10 @@ class App:
             "lookahead_section_change": 0.0,
             "lookahead_climax": 0.0,
             "rhythmic_density": 0.0,
+            # Chroma-derived color features
+            "chroma_hue": 0.5,
+            "tonal_certainty": 0.5,
+            "key_index": 0,
         }
 
     def _cleanup(self):

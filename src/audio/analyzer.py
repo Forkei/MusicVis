@@ -18,6 +18,25 @@ from src.audio.ml_analyzer import (
 
 logger = logging.getLogger(__name__)
 
+# Circle-of-fifths hue map: pitch class index → hue position (0-1).
+# Nearby keys on the circle of fifths get similar colors.
+# C→0/12, G→1/12, D→2/12, A→3/12, E→4/12, B→5/12,
+# F#→6/12, Db→7/12, Ab→8/12, Eb→9/12, Bb→10/12, F→11/12
+_CIRCLE_OF_FIFTHS_HUE = np.array([
+    0 / 12,   # C  (index 0)
+    7 / 12,   # C# (index 1) = Db
+    2 / 12,   # D  (index 2)
+    9 / 12,   # D# (index 3) = Eb
+    4 / 12,   # E  (index 4)
+    11 / 12,  # F  (index 5)
+    6 / 12,   # F# (index 6)
+    1 / 12,   # G  (index 7)
+    8 / 12,   # G# (index 8) = Ab
+    3 / 12,   # A  (index 9)
+    10 / 12,  # A# (index 10) = Bb
+    5 / 12,   # B  (index 11)
+], dtype=np.float32)
+
 
 @dataclass
 class AnalysisResult:
@@ -144,7 +163,37 @@ class AnalysisResult:
             "lookahead_section_change": float(self.lookahead_section_change[f]),
             "lookahead_climax": float(self.lookahead_climax[f]),
             "rhythmic_density": float(self.rhythmic_density[f]),
+            # Chroma-derived color features
+            "chroma_hue": float(self._chroma_hue(f)),
+            "tonal_certainty": float(self._tonal_certainty(f)),
+            "key_index": self.key_index,
         }
+
+    def _chroma_hue(self, f: int) -> float:
+        """Circular weighted mean of top-3 chroma bins via circle-of-fifths."""
+        chroma_col = self.chroma[:, f]
+        top3 = np.argsort(chroma_col)[-3:]
+        weights = chroma_col[top3]
+        w_sum = weights.sum()
+        if w_sum < 1e-8:
+            return 0.5
+        hues = _CIRCLE_OF_FIFTHS_HUE[top3]
+        # Circular mean using sin/cos
+        angles = hues * 2.0 * np.pi
+        x = np.sum(weights * np.cos(angles)) / w_sum
+        y = np.sum(weights * np.sin(angles)) / w_sum
+        mean_angle = np.arctan2(y, x)
+        if mean_angle < 0:
+            mean_angle += 2.0 * np.pi
+        return mean_angle / (2.0 * np.pi)
+
+    def _tonal_certainty(self, f: int) -> float:
+        """How clear the current chord is: max/mean of chroma, normalized."""
+        chroma_col = self.chroma[:, f]
+        mean_val = chroma_col.mean()
+        if mean_val < 1e-8:
+            return 0.0
+        return min(1.0, (chroma_col.max() / mean_val) / 5.0)
 
 
 def _normalize(arr: np.ndarray) -> np.ndarray:

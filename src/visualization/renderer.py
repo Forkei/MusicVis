@@ -195,7 +195,10 @@ class Renderer:
         self.line_prog["u_global_hue"].value = global_hue
         self.line_prog["u_depth_fog"].value = depth_fog
         self.line_prog["u_fog_color"].value = bloom_tint
-        self.line_prog["u_saturation"].value = 0.85 + settings.get("director_saturation", 0.0)
+        tonal_certainty = settings.get("director_tonal_certainty", 0.5)
+        base_sat = 0.45 + tonal_certainty * 0.45  # 0.45 (atonal) to 0.9 (clear chord)
+        self.line_prog["u_saturation"].value = base_sat + settings.get("director_saturation", 0.0)
+        self.line_prog["u_rms"].value = settings.get("rms", 0.0)
 
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE
